@@ -1,0 +1,23 @@
+FROM public.ecr.aws/docker/library/python:3.11-bookworm
+
+WORKDIR /app
+
+# Install common analysis tools
+RUN apt-get update && apt-get install -y \
+    git \
+    jq \
+    ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create workspace directory for trace data
+RUN mkdir -p /workspace && chmod 777 /workspace
+
+# Install Python dependencies
+COPY pyproject.toml README.md ./
+RUN pip install --no-cache-dir .
+
+# Copy environment code
+COPY env.py ./
+
+# Run the environment
+CMD ["hud", "dev", "env:env", "--stdio"]
