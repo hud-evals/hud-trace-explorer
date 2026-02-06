@@ -29,6 +29,8 @@ The scenario creates these files in `/workspace`:
 | `prompt.txt` | The original prompt given to the agent (if present) |
 | `trajectory.json` | Full trajectory data (if telemetry enabled) |
 | `trajectory_summary.txt` | Human-readable trajectory summary |
+| `screenshots_index.txt` | Index mapping step numbers to screenshot files (if telemetry enabled) |
+| `screenshots/step_XXXX.png` | CUA screenshots (observations) for each step that has them (if telemetry enabled) |
 | `environment_logs.txt` | Environment container logs (if environment enabled) |
 | `worker_logs.txt` | Orchestrator/worker logs (if worker enabled) |
 
@@ -112,6 +114,14 @@ task = env("analyze",
     query="Which tool calls took the longest? Are there any timeouts?",
     hud_api_key=api_key,
     data_sources=["telemetry"],
+)
+
+# Screenshot (CUA observation) analysis
+task = env("analyze",
+    trace_id="...",
+    query="What UI elements are visible in the screenshots? What actions did the agent take?",
+    hud_api_key=api_key,
+    data_sources=["telemetry"],  # Screenshots downloaded automatically with telemetry
 )
 
 # Log analysis
