@@ -197,9 +197,8 @@ async def download_screenshots(
             internal_type = span.get("internal_type")
 
             # Check if this step should have a screenshot
-            # Based on platform logic: internal_type == "mcp-screenshot" or step_type in ["hud-step", "mcp-step-image"]
+            # Must match platform dependencies.py screenshot detection
             if internal_type == "mcp-screenshot" or step_type in [
-                "step",
                 "hud-step",
                 "mcp-step-image",
             ]:
@@ -341,7 +340,6 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
 
         # Screenshot observation marker — must match download_screenshots() predicate
         if internal_type == "mcp-screenshot" or step_type in (
-            "step",
             "hud-step",
             "mcp-step-image",
         ):
