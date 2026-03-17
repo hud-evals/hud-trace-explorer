@@ -7,6 +7,7 @@ This environment:
 - Evaluates responses against includes/excludes patterns
 """
 
+import base64
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from hud.tools.filesystem import (
     ListTool,
     ReadTool,
 )
+from mcp.types import ImageContent, TextContent
 
 load_dotenv()
 
@@ -78,6 +80,37 @@ env.add_tool(GeminiReadTool(base_path=BASE_PATH))
 env.add_tool(GeminiSearchTool(base_path=BASE_PATH))
 env.add_tool(GeminiGlobTool(base_path=BASE_PATH))
 env.add_tool(GeminiListTool(base_path=BASE_PATH))
+
+
+@env.tool()
+async def view_screenshot(step: int) -> list[TextContent | ImageContent]:
+    """View a screenshot observation by trajectory step number.
+
+    Returns the screenshot image for the given step. Use the trajectory
+    summary or screenshots_index.txt to find which steps have screenshots.
+    """
+    screenshots_dir = WORKSPACE_DIR / "screenshots"
+    path = screenshots_dir / f"step_{step:04d}.png"
+
+    if not path.exists():
+        if screenshots_dir.exists():
+            available = sorted(screenshots_dir.glob("step_*.png"))
+            nums = [p.stem.replace("step_", "") for p in available]
+        else:
+            nums = []
+
+        if nums:
+            listing = ", ".join(nums)
+            msg = f"No screenshot for step {step}. Available steps: {listing}"
+        else:
+            msg = f"No screenshot for step {step}. No screenshots available."
+        return [TextContent(type="text", text=msg)]
+
+    data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+    return [
+        TextContent(type="text", text=f"Screenshot at step {step}:"),
+        ImageContent(type="image", data=data, mimeType="image/png"),
+    ]
 
 
 async def fetch_trace(
@@ -164,9 +197,8 @@ async def download_screenshots(
             internal_type = span.get("internal_type")
 
             # Check if this step should have a screenshot
-            # Based on platform logic: internal_type == "mcp-screenshot" or step_type in ["hud-step", "mcp-step-image"]
+            # Must match platform dependencies.py screenshot detection
             if internal_type == "mcp-screenshot" or step_type in [
-                "step",
                 "hud-step",
                 "mcp-step-image",
             ]:
@@ -303,6 +335,17 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
         name = span.get("name", "unknown")
         attrs = span.get("attributes", {})
         status = span.get("status_code", "")
+        internal_type = span.get("internal_type")
+        step_type = span.get("type")
+
+        # Screenshot observation marker — must match download_screenshots() predicate
+        if internal_type == "mcp-screenshot" or step_type in (
+            "hud-step",
+            "mcp-step-image",
+        ):
+            lines.append(f"[{i:04d}] SCREENSHOT (observation)")
+            lines.append("")
+            continue
 
         # Extract tool info
         tool_name = attrs.get("tool_name", "")
@@ -600,14 +643,15 @@ async def analyze_trace(
 - `environment_logs.txt`: Container logs from the evaluation environment (if requested)
 - `worker_logs.txt`: Orchestrator/worker logs (if requested)
 
-**Note:** Screenshots are always fetched from production storage. Use the `read` tool to view screenshots
-as base64-encoded images that will be displayed to you visually.
+**Note:** Screenshots are always fetched from production storage. Use the `view_screenshot` tool with a
+step number to view any screenshot directly. Steps with screenshots are marked in trajectory_summary.txt.
 
 ## YOUR TASK
 {query}
 
 ## INSTRUCTIONS
 Use the tools to read and analyze the trace files. You have access to:
+- `view_screenshot(step=N)` to view screenshot observations by step number
 - File reading tools to examine logs and trajectory
 - Grep/search tools to find specific patterns
 - Bash tools for more complex analysis
