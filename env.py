@@ -417,6 +417,13 @@ async def write_trace_files(
         prompt_path.write_text(str(trace_data["prompt"]), encoding="utf-8")
         files_written["prompt"] = prompt_path
 
+    # Write agent system prompt if available
+    agent_model_info = (trace_data.get("metadata") or {}).get("agent_model_info", {})
+    if isinstance(agent_model_info, dict) and agent_model_info.get("system_prompt"):
+        sp_path = WORKSPACE_DIR / "agent_system_prompt.txt"
+        sp_path.write_text(str(agent_model_info["system_prompt"]), encoding="utf-8")
+        files_written["agent_system_prompt"] = sp_path
+
     # Write telemetry/trajectory
     if "telemetry" in data_sources:
         trajectory = trace_data.get("trajectory", [])
@@ -597,6 +604,7 @@ async def analyze_trace(
 - `prompt.txt`: The original task prompt given to the agent
 - `screenshots_index.txt`: Index of available CUA screenshots (observations)
 - `screenshots/step_XXXX.png`: Screenshot images for each step (PNG format, can be read with read tool)
+- `agent_system_prompt.txt`: The system prompt given to the agent under test (if available)
 - `environment_logs.txt`: Container logs from the evaluation environment (if requested)
 - `worker_logs.txt`: Orchestrator/worker logs (if requested)
 
