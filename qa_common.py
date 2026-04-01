@@ -36,13 +36,13 @@ async def prepare_qa_context(
     file_descriptions: dict[str, str] = {
         "metadata": "trace ID, job ID, reward, status, scenario args",
         "prompt": "the task prompt given to the agent",
-        "scenario_setup": "the scenario's setup arguments — everything the environment received at initialization",
+        "scenario_setup": "the scenario's full setup arguments — graders, config, patches, commands, etc. depending on the environment",
         "evaluation_result": "the evaluator's output — reward, subscores, grader verdicts",
         "trajectory_summary": "human-readable summary of agent actions, tool calls, and errors",
         "trajectory": "full trajectory spans (LARGE — use grep/bash to search, do NOT read in full)",
         "screenshots_index": "index of available CUA screenshots by step number",
-        "environment_logs": "container / environment logs (grader output often appears here)",
-        "worker_logs": "orchestrator / rollout worker logs",
+        "environment_logs": "container / environment logs including grader output (can be LARGE — grep for errors first)",
+        "worker_logs": "orchestrator / rollout worker logs (can be LARGE — grep for errors first)",
     }
 
     file_lines = []
@@ -70,7 +70,8 @@ async def prepare_qa_context(
 {chr(10).join(file_lines)}
 
 **Start with the small files:** `scenario_setup.json`, `evaluation_result.json`,
-`trajectory_summary.txt`, then check logs. Use grep/bash to search
-`trajectory.json` for specific patterns — do NOT read it in full."""
+`trajectory_summary.txt`, `metadata.json`. For large files (`trajectory.json`,
+`environment_logs.txt`, `worker_logs.txt`), use grep/bash to search for
+specific patterns — do NOT read them in full."""
 
     return trace_data, files_written, context
