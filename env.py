@@ -673,5 +673,10 @@ Be VERY BRIEF - respond with ONE short paragraph that directly answers the quest
         yield 1.0 if response else 0.0
 
 
+import qa_false_negative  # noqa: F401, E402
+import qa_false_positive  # noqa: F401, E402
+import qa_failure_analysis  # noqa: F401, E402
+import qa_reward_hacking  # noqa: F401, E402
+
 if __name__ == "__main__":
     env.run(transport="stdio")

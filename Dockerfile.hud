@@ -17,7 +17,7 @@ COPY pyproject.toml README.md ./
 RUN pip install --no-cache-dir .
 
 # Copy environment code
-COPY env.py ./
+COPY env.py qa_*.py ./
 
 # Run the environment
 CMD ["hud", "dev", "env:env", "--stdio"]
