@@ -5,7 +5,7 @@ description = "HUD environment for exploring and analyzing trace data using codi
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "hud-python",
+    "hud-python>=0.5.34",
     "httpx>=0.27.0",
 ]
 
