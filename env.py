@@ -537,6 +537,13 @@ async def write_trace_files(
             prompt_path.write_text(setup_prompt, encoding="utf-8")
             files_written["prompt"] = prompt_path
 
+    # Write scenario source code if available from the API response
+    scenario_code = trace_data.get("scenario_code")
+    if scenario_code and isinstance(scenario_code, str):
+        code_path = WORKSPACE_DIR / "scenario_code.py"
+        code_path.write_text(scenario_code, encoding="utf-8")
+        files_written["scenario_code"] = code_path
+
     # Extract and write evaluation results (from resources/read.mcp spans)
     # This is the scenario's evaluate phase output — reward, subscores,
     # grader verdicts, etc.

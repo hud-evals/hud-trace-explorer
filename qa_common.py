@@ -37,6 +37,7 @@ async def prepare_qa_context(
         "metadata": "trace ID, job ID, reward, status, scenario args",
         "prompt": "the task prompt given to the agent",
         "scenario_setup": "the scenario's full setup arguments — graders, config, patches, commands, etc. depending on the environment",
+        "scenario_code": "the scenario's source code (setup + evaluate logic) — shows how the task was configured and graded",
         "evaluation_result": "the evaluator's output — reward, subscores, grader verdicts",
         "trajectory_summary": "human-readable summary of agent actions, tool calls, and errors",
         "trajectory": "full trajectory spans (LARGE — use grep/bash to search, do NOT read in full)",
