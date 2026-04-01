@@ -413,6 +413,67 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _parse_json_or_passthrough(value: Any) -> Any:
+    """If value is a JSON-encoded string, parse it; otherwise return as-is."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return value
+    return value
+
+
+def _extract_scenario_setup(trajectory: list[dict[str, Any]]) -> dict[str, Any]:
+    """Extract scenario setup data from prompts/get.mcp spans.
+
+    This is the scenario's setup call — whatever arguments the env
+    received when the scenario was initialized.  Works for any environment.
+    """
+    for span in trajectory:
+        if span.get("name") == "prompts/get.mcp":
+            args = (
+                span.get("attributes", {})
+                .get("request", {})
+                .get("params", {})
+                .get("arguments", {})
+            )
+            if args:
+                return {k: _parse_json_or_passthrough(v) for k, v in args.items()}
+    return {}
+
+
+def _extract_evaluation_results(
+    trajectory: list[dict[str, Any]],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Extract all evaluation/resource read results from the trajectory.
+
+    Returns every resources/read.mcp response that contains structured
+    data (the scenario's evaluate phase output).  Falls back to
+    metadata.evaluation_result if no spans found.
+    """
+    results: list[dict[str, Any]] = []
+    for span in trajectory:
+        if span.get("name") != "resources/read.mcp":
+            continue
+        for entry in (
+            span.get("attributes", {}).get("result", {}).get("contents", [])
+        ):
+            try:
+                parsed = json.loads(entry.get("text", ""))
+                if isinstance(parsed, dict):
+                    results.append(parsed)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+    if not results:
+        eval_result = metadata.get("evaluation_result")
+        if isinstance(eval_result, dict):
+            results.append(eval_result)
+
+    return results
+
+
 async def write_trace_files(
     trace_data: dict[str, Any],
     data_sources: list[str],
@@ -429,6 +490,9 @@ async def write_trace_files(
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     files_written: dict[str, Path] = {}
 
+    trajectory = trace_data.get("trajectory", [])
+    trace_metadata = trace_data.get("metadata", {})
+
     # Always write metadata (all non-trajectory/logs fields)
     metadata = {
         "trace_id": trace_data.get("trace_id"),
@@ -436,16 +500,13 @@ async def write_trace_files(
         "status": trace_data.get("status"),
         "reward": trace_data.get("reward"),
         "error": trace_data.get("error"),
-        # Task identification
         "external_id": trace_data.get("external_id"),
         "task_id": trace_data.get("task_id"),
         "task_version_id": trace_data.get("task_version_id"),
-        # Context
         "scenario": trace_data.get("scenario"),
         "scenario_args": trace_data.get("scenario_args"),
         "prompt": trace_data.get("prompt"),
-        "metadata": trace_data.get("metadata", {}),
-        # Counts
+        "metadata": trace_metadata,
         "trajectory_length": trace_data.get("trajectory_length"),
         "logs_count": trace_data.get("logs_count"),
         "logs_error": trace_data.get("logs_error"),
@@ -460,16 +521,39 @@ async def write_trace_files(
         prompt_path.write_text(str(trace_data["prompt"]), encoding="utf-8")
         files_written["prompt"] = prompt_path
 
-    # Write telemetry/trajectory
-    if "telemetry" in data_sources:
-        trajectory = trace_data.get("trajectory", [])
+    # Extract and write scenario setup (from prompts/get.mcp span)
+    # This is everything the scenario received at initialization —
+    # prompt, graders, patches, config, etc. depending on the environment.
+    setup_args = _extract_scenario_setup(trajectory)
+    if setup_args:
+        setup_path = WORKSPACE_DIR / "scenario_setup.json"
+        setup_path.write_text(json.dumps(setup_args, indent=2, default=str), encoding="utf-8")
+        files_written["scenario_setup"] = setup_path
 
-        # Write full trajectory as JSON (for deep inspection)
+        # If setup contains a prompt and we don't already have one from the API
+        setup_prompt = setup_args.get("prompt") or setup_args.get("task_prompt")
+        if setup_prompt and isinstance(setup_prompt, str) and not trace_data.get("prompt"):
+            prompt_path = WORKSPACE_DIR / "prompt.txt"
+            prompt_path.write_text(setup_prompt, encoding="utf-8")
+            files_written["prompt"] = prompt_path
+
+    # Extract and write evaluation results (from resources/read.mcp spans)
+    # This is the scenario's evaluate phase output — reward, subscores,
+    # grader verdicts, etc.
+    eval_results = _extract_evaluation_results(trajectory, trace_metadata)
+    if eval_results:
+        eval_path = WORKSPACE_DIR / "evaluation_result.json"
+        # If single result, write flat; if multiple, write as array
+        content = eval_results[0] if len(eval_results) == 1 else eval_results
+        eval_path.write_text(json.dumps(content, indent=2, default=str), encoding="utf-8")
+        files_written["evaluation_result"] = eval_path
+
+    # Write telemetry/trajectory
+    if "telemetry" in data_sources or "trajectory" in data_sources:
         traj_path = WORKSPACE_DIR / "trajectory.json"
         traj_path.write_text(json.dumps(trajectory, indent=2), encoding="utf-8")
         files_written["trajectory"] = traj_path
 
-        # Write a human-readable summary focused on tool calls and errors
         summary_lines = _preprocess_trajectory(trajectory)
         summary_path = WORKSPACE_DIR / "trajectory_summary.txt"
         summary_path.write_text("\n".join(summary_lines), encoding="utf-8")

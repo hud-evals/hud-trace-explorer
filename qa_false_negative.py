@@ -4,7 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from env import env, fetch_trace, write_trace_files, logger
+from env import env
+from qa_common import prepare_qa_context
 
 
 class FalseNegativeResult(BaseModel):
@@ -20,28 +21,10 @@ async def false_negative_analysis(
     query: str = "",
     ground_truth: bool | None = None,
 ) -> Any:
-    """Determine whether a low-reward trace is a false negative.
+    """Determine whether a low-reward trace is a false negative."""
+    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "False negative analysis")
 
-    A false negative occurs when the agent successfully completed the
-    task (or got very close) but the grader gave it a low or zero reward.
-    """
-    data_sources = ["telemetry", "environment", "worker"]
-
-    logger.info("False negative analysis for trace %s", trace_id)
-
-    trace_data = await fetch_trace(trace_id, hud_api_key, data_sources)
-    files_written = await write_trace_files(trace_data, data_sources)
-
-    reward = trace_data.get("reward", "unknown")
-    status = trace_data.get("status") or "unknown"
-    error_info = trace_data.get("error") or ""
-    task_prompt = trace_data.get("prompt") or ""
-    if len(task_prompt) > 800:
-        task_prompt = task_prompt[:800] + "... (see prompt.txt for full text)"
-
-    file_list = ", ".join(path.name for path in files_written.values())
-
-    user_focus = query.strip() if query.strip() else (
+    user_focus = query.strip() or (
         "Determine whether this trace is a false negative — did the agent "
         "actually succeed at the task but receive a low or zero reward?"
     )
@@ -65,30 +48,18 @@ the grader gave it a low or zero reward. Common causes include:
 A false negative is NOT when the agent genuinely failed the task. If the agent's work is
 wrong, incomplete, or doesn't meet the requirements, the low reward is justified.
 
-## Trace context
-- **Status:** {status}
-- **Reward:** {reward}
-- **Error:** {error_info or "(none)"}
-
-## Task prompt
-{task_prompt or "(not available)"}
-
-## Available files
-{file_list}
-
-Use `trajectory_summary.txt` for a quick overview of agent actions.
-Use grep/bash to search `trajectory.json` for specific patterns — do NOT read it in full.
-Check `environment_logs.txt` and `worker_logs.txt` for infrastructure issues during grading.
+{context}
 
 ## Focus
 {user_focus}
 
 ## Analysis steps
 1. Understand what the task required from the prompt
-2. Trace what the agent actually did via the trajectory summary
-3. Compare the agent's final output/actions against what the task required
-4. Check environment and worker logs for grader timeouts, crashes, or infrastructure failures
-5. Determine whether the reward is justified or if the agent was unfairly penalized"""
+2. Read the scenario setup and evaluation result to understand grading criteria
+3. Trace what the agent actually did via the trajectory summary
+4. Compare the agent's final output/actions against what the task required
+5. Check environment and worker logs for grader timeouts, crashes, or infrastructure failures
+6. Determine whether the reward is justified or if the agent was unfairly penalized"""
 
     response: FalseNegativeResult = yield prompt
 
