@@ -12,3 +12,5 @@ __pycache__/
 *.pywzzz
 
 .env
+
+tasks/
