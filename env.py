@@ -39,6 +39,25 @@ from mcp.types import ImageContent, TextContent
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# SDK workaround: _build_answer_for_generator loses flat dicts (no "content"
+# key) because it does dict.get("content", "").  Convert to JSON string so the
+# SDK takes the string path instead.
+# ---------------------------------------------------------------------------
+import hud.environment.scenarios as _hud_scenarios
+
+_orig_build_answer = _hud_scenarios._build_answer_for_generator
+
+
+def _build_answer_compat(session):  # type: ignore[no-untyped-def]
+    raw = session.answer
+    if isinstance(raw, dict) and "content" not in raw:
+        session.answer = json.dumps(raw)
+    return _orig_build_answer(session)
+
+
+_hud_scenarios._build_answer_for_generator = _build_answer_compat
+
 # Configure logging to stderr (MCP uses stdout)
 logging.basicConfig(
     stream=sys.stderr,
@@ -106,10 +125,24 @@ async def view_screenshot(step: int) -> list[TextContent | ImageContent]:
             msg = f"No screenshot for step {step}. No screenshots available."
         return [TextContent(type="text", text=msg)]
 
-    data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+    raw = path.read_bytes()
+    data = base64.standard_b64encode(raw).decode("ascii")
+
+    # Detect actual image format from magic bytes instead of trusting the extension
+    if raw[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif raw[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    elif raw[:4] == b"GIF8":
+        mime = "image/gif"
+    elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        mime = "image/png"
+
     return [
         TextContent(type="text", text=f"Screenshot at step {step}:"),
-        ImageContent(type="image", data=data, mimeType="image/png"),
+        ImageContent(type="image", data=data, mimeType=mime),
     ]
 
 
@@ -124,7 +157,6 @@ async def fetch_trace(
         trace_id: The trace UUID
         api_key: HUD API key
         data_sources: List of data sources to include (telemetry, environment, worker)
-        api_url: HUD API base URL
 
     Returns:
         Trace data dictionary
@@ -145,7 +177,7 @@ async def fetch_trace(
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.get(url, params=params, headers=headers)
         response.raise_for_status()
         return response.json()
@@ -314,17 +346,17 @@ def _preprocess_worker_logs(logs: str | list[Any] | Any) -> list[str]:
     return [str(logs)]
 
 
-def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
+def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     """Preprocess trajectory into a readable summary.
 
     Focuses on:
     - Tool calls with their inputs (truncated)
     - Tool results (success/failure)
     - Errors and exceptions
-    - Agent messages
+    - Agent messages / inference turns
     """
     if not trajectory:
-        return ["(no trajectory data)"]
+        return ["(no trajectory data)"], []
 
     lines = ["=" * 60, "TRAJECTORY SUMMARY", "=" * 60, ""]
 
@@ -347,17 +379,50 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
             lines.append("")
             continue
 
-        # Extract tool info
+        # Extract tool info — support both flat attrs and MCP-style nested structure
         tool_name = attrs.get("tool_name", "")
         tool_input = attrs.get("tool_input", "")
         tool_result = attrs.get("tool_result", "")
 
-        # Skip non-interesting spans (keep tool calls, errors, agent turns)
+        # MCP-style spans: tool name in request.params.name, args in request.params.arguments
+        if not tool_name and name == "tools/call.mcp":
+            mcp_params = attrs.get("request", {}).get("params", {})
+            tool_name = mcp_params.get("name", "")
+            tool_input = mcp_params.get("arguments", "")
+            mcp_result = attrs.get("result", {})
+            if isinstance(mcp_result, dict):
+                for c in mcp_result.get("content", []):
+                    if isinstance(c, dict) and c.get("text"):
+                        tool_result = c["text"]
+                        break
+
+        # MCP-style inference spans
+        is_inference = name.startswith("inference.")
+        inference_content = ""
+        inference_tool_calls: list[dict] = []
+        if is_inference:
+            result = attrs.get("result", {})
+            if isinstance(result, dict):
+                content = result.get("content", "")
+                if isinstance(content, str) and content:
+                    inference_content = content
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text" and block.get("text"):
+                                inference_content = block["text"]
+                            elif block.get("type") == "tool_use":
+                                inference_tool_calls.append(block)
+                tc = result.get("tool_calls", [])
+                if tc:
+                    inference_tool_calls = tc
+
+        # Skip non-interesting spans (keep tool calls, errors, agent turns, inference)
         is_tool_call = bool(tool_name)
         is_error = status == "ERROR" or span.get("exceptions")
         is_agent_turn = "agent" in name.lower() or "llm" in name.lower()
 
-        if not (is_tool_call or is_error or is_agent_turn):
+        if not (is_tool_call or is_error or is_agent_turn or is_inference):
             continue
 
         # Format the span
@@ -370,7 +435,6 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
                 input_str = str(tool_input)
                 if len(input_str) > 300:
                     input_str = input_str[:300] + "..."
-                # Clean up for readability
                 input_str = input_str.replace("\n", " ").replace("  ", " ")
                 lines.append(f"       INPUT: {input_str}")
 
@@ -386,6 +450,25 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
                 lines.append(f"       RESULT: {result_str}")
 
             lines.append("")
+
+        elif is_inference:
+            if inference_tool_calls:
+                for tc in inference_tool_calls:
+                    func = tc.get("function", tc)
+                    tc_name = func.get("name", "?")
+                    tc_args = str(func.get("arguments", func.get("input", "")))
+                    if len(tc_args) > 200:
+                        tc_args = tc_args[:200] + "..."
+                    lines.append(f"[{i:04d}] AGENT -> tool_call: {tc_name}")
+                    lines.append(f"       ARGS: {tc_args}")
+                    lines.append("")
+            elif inference_content:
+                content_preview = inference_content.replace("\n", " ")
+                if len(content_preview) > 300:
+                    content_preview = content_preview[:300] + "..."
+                lines.append(f"[{i:04d}] AGENT RESPONSE")
+                lines.append(f"       {content_preview}")
+                lines.append("")
 
         elif is_error:
             error_count += 1
@@ -406,11 +489,94 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> list[str]:
             lines.append(f"[{i:04d}] {name}")
             lines.append("")
 
+    # ---- File modifications detail ----
+    # Extract file-write operations with full content so the analyst
+    # can see what was actually written (the main summary truncates to 300 chars).
+    file_mods: list[tuple[int, str, str, str]] = []
+
+    for i, span in enumerate(trajectory):
+        attrs = span.get("attributes", {})
+        t_name = attrs.get("tool_name", "")
+        raw_input = attrs.get("tool_input", "")
+
+        if not t_name and span.get("name") == "tools/call.mcp":
+            mcp_p = attrs.get("request", {}).get("params", {})
+            t_name = mcp_p.get("name", "")
+            raw_input = mcp_p.get("arguments", "")
+
+        if not t_name:
+            continue
+
+        inp = raw_input
+        if isinstance(inp, str):
+            try:
+                inp = json.loads(inp)
+            except (json.JSONDecodeError, TypeError):
+                inp = {}
+        if not isinstance(inp, dict):
+            continue
+
+        file_path = inp.get("path") or inp.get("file_path") or inp.get("filename", "")
+        if not file_path:
+            continue
+
+        cmd = str(inp.get("command", "")).lower()
+        content = ""
+
+        if cmd == "create":
+            content = str(inp.get("file_text", ""))
+        elif cmd == "str_replace":
+            old = str(inp.get("old_str", ""))
+            new = str(inp.get("new_str", ""))
+            if old or new:
+                content = f"REPLACED:\n{old}\nWITH:\n{new}"
+        elif cmd == "insert":
+            content = str(inp.get("new_str", ""))
+        elif cmd in ("view", "read", "undo_edit"):
+            continue
+        else:
+            tn_lower = t_name.lower()
+            if any(kw in tn_lower for kw in ("write", "create", "edit", "replace", "patch")):
+                old_val = inp.get("old_str") or inp.get("old_string") or ""
+                new_val = (
+                    inp.get("file_text") or inp.get("content") or
+                    inp.get("new_str") or inp.get("new_string") or
+                    inp.get("text", "")
+                )
+                if old_val and new_val:
+                    content = f"REPLACED:\n{old_val}\nWITH:\n{new_val}"
+                elif new_val:
+                    content = str(new_val)
+            else:
+                continue
+
+        if not content:
+            continue
+
+        preview = content
+        if len(preview) > 2000:
+            preview = preview[:2000] + f"\n... ({len(content)} total chars)"
+
+        file_mods.append((i, t_name, str(file_path), preview))
+
     # Summary stats
     lines.insert(3, f"Total spans: {len(trajectory)} | Tool calls: {tool_count} | Errors: {error_count}")
     lines.insert(4, "")
 
-    return lines
+    # Build file modifications as a separate list
+    mod_lines: list[str] = []
+    if file_mods:
+        mod_lines.append("=" * 60)
+        mod_lines.append("FILE MODIFICATIONS DETAIL")
+        mod_lines.append("=" * 60)
+        mod_lines.append(f"Agent modified {len(file_mods)} file(s):")
+        mod_lines.append("")
+        for step, tool, path, preview in file_mods:
+            mod_lines.append(f"--- [{step:04d}] {path} (via {tool}) ---")
+            mod_lines.append(preview)
+            mod_lines.append("")
+
+    return lines, mod_lines
 
 
 def _parse_json_or_passthrough(value: Any) -> Any:
@@ -493,6 +659,34 @@ async def write_trace_files(
     trajectory = trace_data.get("trajectory", [])
     trace_metadata = trace_data.get("metadata", {})
 
+    # Extract large scenario_args values into separate files so they're
+    # searchable independently (e.g. code diffs, long prompts).
+    LARGE_VALUE_THRESHOLD = 2000
+    LARGE_VALUE_KEYS = {"code_diff", "diff", "patch", "expected_output"}
+    scenario_args = trace_data.get("scenario_args") or []
+    scenario_args_cleaned = []
+    for arg in scenario_args:
+        if not isinstance(arg, dict):
+            scenario_args_cleaned.append(arg)
+            continue
+        arg_name = arg.get("name", "")
+        arg_value = arg.get("value", "")
+        is_large = isinstance(arg_value, str) and len(arg_value) > LARGE_VALUE_THRESHOLD
+        is_known_large = arg_name in LARGE_VALUE_KEYS
+        if is_large or is_known_large:
+            ext = ".txt"
+            if arg_name in ("code_diff", "diff", "patch"):
+                ext = ".diff"
+            file_name = f"scenario_{arg_name}{ext}"
+            file_path = WORKSPACE_DIR / file_name
+            file_path.write_text(str(arg_value), encoding="utf-8")
+            files_written[f"scenario_{arg_name}"] = file_path
+            scenario_args_cleaned.append(
+                {"name": arg_name, "value": f"(extracted to {file_name} — {len(str(arg_value))} chars)"}
+            )
+        else:
+            scenario_args_cleaned.append(arg)
+
     # Always write metadata (all non-trajectory/logs fields)
     metadata = {
         "trace_id": trace_data.get("trace_id"),
@@ -504,7 +698,7 @@ async def write_trace_files(
         "task_id": trace_data.get("task_id"),
         "task_version_id": trace_data.get("task_version_id"),
         "scenario": trace_data.get("scenario"),
-        "scenario_args": trace_data.get("scenario_args"),
+        "scenario_args": scenario_args_cleaned,
         "prompt": trace_data.get("prompt"),
         "metadata": trace_metadata,
         "trajectory_length": trace_data.get("trajectory_length"),
@@ -561,10 +755,15 @@ async def write_trace_files(
         traj_path.write_text(json.dumps(trajectory, indent=2), encoding="utf-8")
         files_written["trajectory"] = traj_path
 
-        summary_lines = _preprocess_trajectory(trajectory)
+        summary_lines, mod_lines = _preprocess_trajectory(trajectory)
         summary_path = WORKSPACE_DIR / "trajectory_summary.txt"
         summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
         files_written["trajectory_summary"] = summary_path
+
+        if mod_lines:
+            mods_path = WORKSPACE_DIR / "file_changes.txt"
+            mods_path.write_text("\n".join(mod_lines), encoding="utf-8")
+            files_written["file_changes"] = mods_path
 
         # Download and index screenshots (CUA observations)
         # Always downloads from production storage
@@ -728,6 +927,8 @@ async def analyze_trace(
 - `trajectory_summary.txt`: Human-readable summary of agent actions, tool calls, and errors
 - `trajectory.json`: Full trajectory data with all spans and attributes
 - `metadata.json`: Complete trace metadata (job, task, scenario details)
+- `scenario_code_diff.diff`: Code diff from scenario args (if present — extracted for easy searching)
+- `scenario_*.txt`: Other large scenario argument values extracted as standalone files
 - `prompt.txt`: The original task prompt given to the agent
 - `screenshots_index.txt`: Index of available CUA screenshots (observations)
 - `screenshots/step_XXXX.png`: Screenshot images for each step (PNG format, can be read with read tool)
