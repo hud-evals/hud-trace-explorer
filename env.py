@@ -100,6 +100,160 @@ env.add_tool(GeminiSearchTool(base_path=BASE_PATH))
 env.add_tool(GeminiGlobTool(base_path=BASE_PATH))
 env.add_tool(GeminiListTool(base_path=BASE_PATH))
 
+# ---------------------------------------------------------------------------
+# Verification sub-agent: independently re-checks claims from QA analysis
+# ---------------------------------------------------------------------------
+from qa_verification import verify_env
+
+_verify_task = verify_env("verify_claims")
+_VERIFY_MODEL = "claude-sonnet-4-5"
+_VERIFY_MAX_STEPS = 30
+
+
+def _parse_verification_output(text: str) -> dict[str, Any]:
+    """Parse the verifier's structured output into claim statuses and overall verdict.
+
+    Tries JSON extraction first (more robust), falls back to regex on the
+    legacy markdown format.
+    """
+    import re as _re
+
+    from qa_common import _extract_json_object
+
+    json_str = _extract_json_object(text) if text else None
+    if json_str:
+        try:
+            parsed_json = json.loads(json_str)
+            if isinstance(parsed_json, dict) and "claims" in parsed_json:
+                claims = []
+                for c in parsed_json["claims"]:
+                    if isinstance(c, dict) and "status" in c:
+                        claims.append({
+                            "claim": c.get("claim", ""),
+                            "status": c["status"].upper(),
+                            "reason": c.get("reason", ""),
+                        })
+                overall = str(parsed_json.get("result", "inconclusive")).lower()
+                refuted = [
+                    {"claim": c["claim"], "reason": c.get("reason", "")}
+                    for c in claims if c["status"] == "REFUTED"
+                ]
+                return {
+                    "overall": overall,
+                    "claims": claims,
+                    "refuted": refuted,
+                    "verified_count": sum(1 for c in claims if c["status"] == "VERIFIED"),
+                    "refuted_count": len(refuted),
+                    "unverified_count": sum(1 for c in claims if c["status"] == "UNVERIFIED"),
+                }
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+
+    claims: list[dict[str, str]] = []
+    for m in _re.finditer(
+        r"###\s*Claim:\s*(.+?)\n"
+        r".*?\*\*Status:\*\*\s*(VERIFIED|REFUTED|UNVERIFIED)",
+        text,
+        _re.DOTALL,
+    ):
+        claims.append({"claim": m.group(1).strip(), "status": m.group(2).upper()})
+
+    overall_m = _re.search(r"RESULT:\s*(CONFIRMED|REJECTED|INCONCLUSIVE)", text, _re.IGNORECASE)
+    overall = overall_m.group(1).lower() if overall_m else "inconclusive"
+
+    refuted = [
+        {"claim": c["claim"], "reason": c.get("reason", "")}
+        for c in claims if c["status"] == "REFUTED"
+    ]
+
+    return {
+        "overall": overall,
+        "claims": claims,
+        "refuted": refuted,
+        "verified_count": sum(1 for c in claims if c["status"] == "VERIFIED"),
+        "refuted_count": len(refuted),
+        "unverified_count": sum(1 for c in claims if c["status"] == "UNVERIFIED"),
+    }
+
+
+_last_verification_result: dict[str, Any] | None = None
+
+
+@env.tool()
+async def verify_failure_claims(claims: str) -> list[TextContent]:
+    """(Failure-analysis only) Independently verify your key claims about the trace.
+
+    Only use this tool during failure_analysis. Pass a string listing each claim
+    you want verified. A separate verification agent will re-run your commands
+    and try to disprove each claim, returning VERIFIED/REFUTED/UNVERIFIED per
+    claim plus an overall CONFIRMED/REJECTED/INCONCLUSIVE verdict.
+
+    Call this BEFORE rendering your final verdict. Use the results to:
+    - Drop or re-investigate any REFUTED claims
+    - Incorporate the verification outcome into your final answer
+    """
+    global _last_verification_result
+
+    from hud.agents import create_agent
+    from hud.eval.context import get_current_trace_id
+    from hud.eval.manager import run_eval
+    from hud.telemetry.instrument import instrument
+
+    parent_trace_id = get_current_trace_id()
+    task = _verify_task.model_copy(update={"args": {"claims": claims}})
+
+    @instrument(category="subagent", name="verify_failure_claims")
+    async def _run_verifier() -> list[TextContent]:
+        global _last_verification_result
+
+        async with run_eval(
+            task,
+            trace=False,
+            trace_id=parent_trace_id,
+            quiet=True,
+        ) as ctx:
+            agent = create_agent(_VERIFY_MODEL)
+            result = await agent.run(ctx, max_steps=_VERIFY_MAX_STEPS)
+            raw_text = result.content if hasattr(result, "content") and result.content else ""
+
+            parsed = _parse_verification_output(raw_text)
+            _last_verification_result = parsed
+
+            summary_parts = [
+                f"Verification {parsed['overall'].upper()}: "
+                f"{parsed['verified_count']} verified, "
+                f"{parsed['refuted_count']} refuted, "
+                f"{parsed['unverified_count']} unverified.",
+            ]
+            if parsed["refuted"]:
+                summary_parts.append("\nREFUTED claims (you MUST address these):")
+                for entry in parsed["refuted"]:
+                    summary_parts.append(f"  - {entry['claim']}")
+                    if entry.get("reason"):
+                        summary_parts.append(f"    Reason: {entry['reason']}")
+                summary_parts.append(
+                    "\n⚠️ ACTION REQUIRED — STRICT BUDGET: You have at most 3 tool calls remaining."
+                    "\n1. Remove refuted claims OR mark their fault as \"unclear\""
+                    "\n2. Output your final JSON immediately"
+                    "\n\nDo NOT re-investigate or re-prove refuted claims. The verifier already"
+                    "\nran independent commands — additional investigation is wasted effort."
+                    "\nYour very next response should be your final JSON answer."
+                )
+
+            summary_parts.append(f"\n--- Full verification report ---\n{raw_text}")
+
+            return [TextContent(type="text", text="\n".join(summary_parts))]
+
+    return await _run_verifier()
+
+
+def get_last_verification_result() -> dict[str, Any] | None:
+    """Return the most recent verification result, then clear it."""
+    global _last_verification_result
+    result = _last_verification_result
+    _last_verification_result = None
+    return result
+
 
 @env.tool()
 async def view_screenshot(step: int) -> list[TextContent | ImageContent]:
@@ -430,23 +584,21 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> tuple[list[str],
             tool_count += 1
             lines.append(f"[{i:04d}] TOOL: {tool_name}")
 
-            # Show input (truncated)
             if tool_input:
                 input_str = str(tool_input)
-                if len(input_str) > 300:
-                    input_str = input_str[:300] + "..."
+                if len(input_str) > 800:
+                    input_str = input_str[:800] + "..."
                 input_str = input_str.replace("\n", " ").replace("  ", " ")
                 lines.append(f"       INPUT: {input_str}")
 
-            # Show result status
             if is_error:
                 error_count += 1
                 lines.append("       RESULT: FAILED")
             elif tool_result:
                 result_str = str(tool_result)
-                if len(result_str) > 200:
-                    result_str = result_str[:200] + "..."
-                result_str = result_str.replace("\n", " ")[:200]
+                if len(result_str) > 500:
+                    result_str = result_str[:500] + "..."
+                result_str = result_str.replace("\n", " ")[:500]
                 lines.append(f"       RESULT: {result_str}")
 
             lines.append("")
@@ -458,14 +610,14 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> tuple[list[str],
                     tc_name = func.get("name", "?")
                     tc_args = str(func.get("arguments", func.get("input", "")))
                     if len(tc_args) > 200:
-                        tc_args = tc_args[:200] + "..."
+                        tc_args = tc_args[:500] + "..."
                     lines.append(f"[{i:04d}] AGENT -> tool_call: {tc_name}")
                     lines.append(f"       ARGS: {tc_args}")
                     lines.append("")
             elif inference_content:
                 content_preview = inference_content.replace("\n", " ")
-                if len(content_preview) > 300:
-                    content_preview = content_preview[:300] + "..."
+                if len(content_preview) > 600:
+                    content_preview = content_preview[:600] + "..."
                 lines.append(f"[{i:04d}] AGENT RESPONSE")
                 lines.append(f"       {content_preview}")
                 lines.append("")
@@ -479,9 +631,9 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> tuple[list[str],
             exceptions = span.get("exceptions") or []
             for exc in exceptions:
                 if isinstance(exc, dict):
-                    exc_msg = exc.get("message", str(exc))[:200]
+                    exc_msg = exc.get("message", str(exc))[:500]
                 else:
-                    exc_msg = str(exc)[:200]
+                    exc_msg = str(exc)[:500]
                 lines.append(f"       EXCEPTION: {exc_msg}")
             lines.append("")
 
@@ -809,6 +961,72 @@ async def write_trace_files(
     return files_written
 
 
+async def download_task_codebase(
+    registry_id: str,
+    api_key: str,
+) -> Path | None:
+    """Download and extract an environment's source code into the workspace.
+
+    Uses the registry source-url endpoint to get a presigned
+    download URL, then fetches and extracts the tarball under
+    /workspace/task_codebase/.
+
+    Returns the extraction directory on success, None on failure.
+    """
+    import tarfile
+    import tempfile
+
+    api_url = os.environ.get("HUD_API_URL", "https://api.hud.ai")
+    source_url_endpoint = (
+        f"{api_url}/registry/environments/{registry_id}/source-url"
+    )
+    target_dir = WORKSPACE_DIR / "task_codebase"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                source_url_endpoint,
+                headers={"X-API-Key": api_key},
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "source-url returned %d for registry %s: %s",
+                    resp.status_code, registry_id, resp.text,
+                )
+                return None
+
+            download_url = resp.json().get("download_url")
+            if not download_url:
+                logger.warning("source-url response missing download_url")
+                return None
+
+            tarball_resp = await client.get(
+                download_url, follow_redirects=True, timeout=120.0,
+            )
+            if tarball_resp.status_code != 200:
+                logger.warning(
+                    "Tarball download failed with %d", tarball_resp.status_code,
+                )
+                return None
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=True) as tmp:
+            tmp.write(tarball_resp.content)
+            tmp.flush()
+            with tarfile.open(tmp.name, "r:gz") as tar:
+                tar.extractall(path=str(target_dir), filter="data")
+
+        logger.info(
+            "Extracted environment source (%d bytes) to %s",
+            len(tarball_resp.content), target_dir,
+        )
+        return target_dir
+
+    except Exception as exc:
+        logger.warning("Failed to download environment source: %s", exc)
+        return None
+
+
 def check_response(response: str, includes: list[str], excludes: list[str]) -> tuple[float, str]:
     """Check if response contains required patterns and excludes forbidden ones.
 
@@ -879,6 +1097,14 @@ async def analyze_trace(
 
     logger.info("Wrote %d files to %s", len(files_written), WORKSPACE_DIR)
 
+    # Download environment source code if registry_id is available
+    registry_id = trace_data.get("registry_id")
+    if registry_id:
+        source_dir = await download_task_codebase(registry_id, api_key)
+        if source_dir:
+            files_written["task_codebase"] = source_dir
+            logger.info("Environment source available at %s", source_dir)
+
     # Extract key metadata to include directly in prompt
     scenario_info = trace_data.get("scenario") or "unknown"
     external_id = trace_data.get("external_id") or ""
@@ -910,9 +1136,8 @@ async def analyze_trace(
     # Add prompt if available
     task_prompt = trace_data.get("prompt")
     if task_prompt:
-        # Truncate if very long
-        if len(task_prompt) > 500:
-            task_prompt = task_prompt[:500] + "... (see prompt.txt for full text)"
+        if len(task_prompt) > 2000:
+            task_prompt = task_prompt[:2000] + "... (see prompt.txt for full text)"
         metadata_context += f"\n**Task Prompt:**\n{task_prompt}\n"
 
     prompt = f"""Analyze this HUD evaluation trace to answer the question below.
@@ -934,6 +1159,7 @@ async def analyze_trace(
 - `screenshots/step_XXXX.png`: Screenshot images for each step (PNG format, can be read with read tool)
 - `environment_logs.txt`: Container logs from the evaluation environment (if requested)
 - `worker_logs.txt`: Orchestrator/worker logs (if requested)
+- `task_codebase/`: The source code of the task environment — grading logic, scenario definitions, reference solutions, and test suites. Run `ls /workspace/task_codebase/` to explore. Read the grading scripts and any golden solutions inside to understand what correct behavior looks like.
 
 **Note:** Screenshots are always fetched from production storage. Use the `view_screenshot` tool with a
 step number to view any screenshot directly. Steps with screenshots are marked in trajectory_summary.txt.
@@ -969,6 +1195,6 @@ import qa_false_negative  # noqa: F401, E402
 import qa_false_positive  # noqa: F401, E402
 import qa_failure_analysis  # noqa: F401, E402
 import qa_reward_hacking  # noqa: F401, E402
-
+import qa_prompt_alignment  # noqa: F401, E402
 if __name__ == "__main__":
     env.run(transport="stdio")
