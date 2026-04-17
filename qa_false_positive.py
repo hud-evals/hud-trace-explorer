@@ -71,7 +71,18 @@ A false positive is NOT when the agent genuinely solved the task.
 ## Focus
 {user_focus}
 
-## Analysis steps — do ALL of these
+## PREREQUISITE — do this before anything else
+
+Your FIRST action must be to explore `/workspace/task_codebase/`. Run these commands NOW:
+1. `ls -R /workspace/task_codebase/` to see the full tree
+2. Read grading scripts (e.g. `env.py`, `task.py`) — check if they are stubs or functional
+3. If `tasks/*/golden/` exists, read the reference solutions
+4. If `tasks/*/tests/` exists, read the test suites
+
+Not every task has golden solutions or test directories. Read whatever is available.
+You need this context before evaluating the agent's work. Do NOT skip this.
+
+## Analysis steps (after reading task_codebase)
 1. Read `metadata.json` — check `metadata.usage.total_input_tokens`. If < 100 total,
    the agent may not have read real content (pre-training contamination). But for CUA
    tasks using screenshots, low text token counts are expected — check for screenshot
@@ -89,7 +100,9 @@ A false positive is NOT when the agent genuinely solved the task.
 5. Read `trajectory_summary.txt` — did the agent meaningfully engage with the task?
    Check whether the agent completed the task through the intended method, or whether
    it gave up and fell back to guessing or reasoning from general knowledge.
-6. Verdict: did functional graders pass, or does the reward come entirely from stubs,
+6. Compare the agent's output against the golden solution from the prerequisite. Extract
+   specific code or outputs side-by-side to verify correctness, not just surface similarity.
+7. Verdict: did functional graders pass, or does the reward come entirely from stubs,
    structural checks, pre-trained knowledge, grading leniency, or lucky guesses?
 
 ## Required output format
@@ -113,4 +126,4 @@ Return ONLY a JSON object — no markdown fences, no extra text:
     if gt is not None:
         yield 1.0 if (result.is_false_positive == gt) else 0.0
     else:
-        yield 1.0
+        yield 0.0 if result.is_false_positive else 1.0

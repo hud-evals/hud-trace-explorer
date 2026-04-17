@@ -118,13 +118,26 @@ evidence** that the agent's work was actually correct.
 ## Focus
 {user_focus}
 
-## Analysis steps
+## PREREQUISITE — do this before anything else
+
+Your FIRST action must be to explore `/workspace/task_codebase/`. Run these commands NOW:
+1. `ls -R /workspace/task_codebase/` to see the full tree
+2. Read grading scripts (e.g. `env.py`, `task.py`)
+3. If `tasks/*/golden/` exists, read the reference solutions
+4. If `tasks/*/tests/` exists, read the test suites
+
+Not every task has golden solutions or test directories. Read whatever is available.
+You need this context to distinguish format-only mismatches from real errors. Do NOT skip this.
+
+## Analysis steps (after reading task_codebase)
 1. Read `metadata.json` and `evaluation_result.json` to understand the reward and grading
 2. Read `scenario_setup.json` or `scenario_code.py` to understand grading criteria
 3. Read `trajectory_summary.txt` to trace what the agent actually did
 4. Compare the agent's final output against what the task required — check BOTH for correctness
 5. If the answer differs from expected: determine whether the difference is format-only
-   (false negative) or a genuine error (justified failure)
+   (false negative) or a genuine error (justified failure). Cross-reference against the golden
+   solution from the prerequisite. Extract the agent's actual code/output and the expected
+   answer side-by-side — pinpoint the exact divergence.
 6. Check environment/worker logs for infrastructure failures only if steps 1-5 are inconclusive
 7. Produce a clear `is_false_negative` verdict with reasoning
 
@@ -148,4 +161,4 @@ Return ONLY a JSON object with exactly these fields — no markdown, no extra te
     if gt is not None:
         yield 1.0 if (result.is_false_negative == gt) else 0.0
     else:
-        yield 1.0
+        yield 0.0 if result.is_false_negative else 1.0

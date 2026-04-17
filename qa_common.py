@@ -8,7 +8,7 @@ from typing import Any, get_args, get_origin, Literal
 from pydantic import TypeAdapter
 from pydantic_core import PydanticUndefined
 
-from env import fetch_trace, write_trace_files, logger
+from env import fetch_trace, write_trace_files, download_task_codebase, logger, WORKSPACE_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -18,22 +18,48 @@ from env import fetch_trace, write_trace_files, logger
 
 def _extract_json_object(text: str) -> str | None:
     """Extract a JSON object from text that may contain markdown fences or prose."""
-    fenced = _re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.DOTALL)
-    if fenced:
-        return fenced[-1]
-    depth = 0
-    start = None
-    last_obj = None
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                last_obj = text[start : i + 1]
-    return last_obj
+
+    def _brace_depth_scan(s: str) -> str | None:
+        depth = 0
+        start = None
+        last_obj = None
+        in_string = False
+        escape = False
+        for i, ch in enumerate(s):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                if in_string:
+                    escape = True
+                continue
+            if ch == '"':
+                if depth > 0:
+                    in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    last_obj = s[start : i + 1]
+        return last_obj
+
+    fenced = _re.findall(r"```(?:json)?\s*(.*?)\s*```", text, _re.DOTALL)
+    for block in reversed(fenced):
+        obj = _brace_depth_scan(block)
+        if obj is not None:
+            try:
+                _json.loads(obj)
+                return obj
+            except (ValueError, _json.JSONDecodeError):
+                pass
+
+    return _brace_depth_scan(text)
 
 
 def _regex_extract_result(text: str, model_cls: type) -> Any | None:
@@ -198,10 +224,22 @@ async def prepare_qa_context(
     """
     data_sources = ["telemetry", "environment", "worker"]
 
+    # Ensure HUD settings has the API key so subagent create_agent() can resolve models
+    from hud.settings import settings as _hud_settings
+    if not _hud_settings.api_key and hud_api_key:
+        _hud_settings.api_key = hud_api_key
+
     logger.info("%s for trace %s", scenario_label, trace_id)
 
     trace_data = await fetch_trace(trace_id, hud_api_key, data_sources)
     files_written = await write_trace_files(trace_data, data_sources)
+
+    # Download environment source code if registry_id is available
+    registry_id = trace_data.get("registry_id")
+    if registry_id:
+        source_dir = await download_task_codebase(registry_id, hud_api_key)
+        if source_dir:
+            files_written["task_codebase"] = source_dir
 
     status = trace_data.get("status") or "unknown"
     reward = trace_data.get("reward", "unknown")
@@ -210,8 +248,8 @@ async def prepare_qa_context(
     scenario = trace_data.get("scenario") or ""
     trajectory_length = trace_data.get("trajectory_length", 0)
 
-    if len(task_prompt) > 800:
-        task_prompt = task_prompt[:800] + "... (see prompt.txt for full text)"
+    if len(task_prompt) > 2000:
+        task_prompt = task_prompt[:2000] + "... (see prompt.txt for full text)"
 
     file_descriptions: dict[str, str] = {
         "metadata": "trace ID, job ID, reward, status, scenario args",
@@ -225,6 +263,7 @@ async def prepare_qa_context(
         "screenshots_index": "index of available CUA screenshots by step number",
         "environment_logs": "container / environment logs including grader output (can be LARGE — grep for errors first)",
         "worker_logs": "orchestrator / rollout worker logs (can be LARGE — grep for errors first)",
+        "task_codebase": "⚠️ The source code of the task environment — grading logic, scenario definitions, reference solutions, and test suites. Run `ls /workspace/task_codebase/` to explore. Read the grading scripts and any golden solutions inside to understand what correct behavior looks like",
     }
 
     file_lines = []
@@ -264,6 +303,10 @@ All trace files are in `/workspace/`. Use the provided tools to read them:
 3. `trajectory_summary.txt` — see what the agent did step by step
 4. `file_changes.txt` — **MOST IMPORTANT** — see the actual code changes and evaluate
    whether they solve the stated problem or just satisfy the grading metric
+5. `task_codebase/` — **VERY IMPORTANT** — browse the task's source code to understand how
+   the grader works, what scenarios are defined, and find reference/golden solutions.
+   Run `ls /workspace/task_codebase/` first, then read grading scripts, test suites,
+   and any reference implementations inside.
 
 For large files (`trajectory.json`, `environment_logs.txt`, `worker_logs.txt`),
 use grep/bash to search for specific patterns — do NOT read them in full.
