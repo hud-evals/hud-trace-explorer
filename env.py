@@ -107,7 +107,7 @@ from qa_verification import verify_env
 
 _verify_task = verify_env("verify_claims")
 _VERIFY_MODEL = "claude-sonnet-4-5"
-_VERIFY_MAX_STEPS = 30
+_VERIFY_MAX_STEPS = 50
 
 
 def _parse_verification_output(text: str) -> dict[str, Any]:
@@ -197,7 +197,11 @@ async def verify_failure_claims(claims: str) -> list[TextContent]:
     from hud.agents import create_agent
     from hud.eval.context import get_current_trace_id
     from hud.eval.manager import run_eval
+    from hud.settings import settings
     from hud.telemetry.instrument import instrument
+
+    if not settings.api_key:
+        return [TextContent(type="text", text="ERROR: HUD API key not available for verification subagent. Skipping verification — output your final JSON now.")]
 
     parent_trace_id = get_current_trace_id()
     task = _verify_task.model_copy(update={"args": {"claims": claims}})

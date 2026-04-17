@@ -126,4 +126,4 @@ Return ONLY a JSON object — no markdown fences, no extra text:
     if gt is not None:
         yield 1.0 if (result.is_false_positive == gt) else 0.0
     else:
-        yield 1.0
+        yield 0.0 if result.is_false_positive else 1.0

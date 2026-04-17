@@ -224,6 +224,11 @@ async def prepare_qa_context(
     """
     data_sources = ["telemetry", "environment", "worker"]
 
+    # Ensure HUD settings has the API key so subagent create_agent() can resolve models
+    from hud.settings import settings as _hud_settings
+    if not _hud_settings.api_key and hud_api_key:
+        _hud_settings.api_key = hud_api_key
+
     logger.info("%s for trace %s", scenario_label, trace_id)
 
     trace_data = await fetch_trace(trace_id, hud_api_key, data_sources)
