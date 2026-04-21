@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result, normalize_optional_bool
+from qa_common import normalize_optional_bool, parse_qa_result, prepare_qa_context
 
 
 class FalseNegativeResult(BaseModel):

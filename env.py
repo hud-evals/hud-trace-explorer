@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+# ---------------------------------------------------------------------------
+# SDK workaround: _build_answer_for_generator loses flat dicts (no "content"
+# key) because it does dict.get("content", "").  Convert to JSON string so the
+# SDK takes the string path instead.
+# ---------------------------------------------------------------------------
+import hud.environment.scenarios as _hud_scenarios
 from dotenv import load_dotenv
 from httpx import AsyncClient
 from hud import Environment
@@ -37,14 +44,12 @@ from hud.tools.filesystem import (
 )
 from mcp.types import ImageContent, TextContent
 
-load_dotenv()
+# ---------------------------------------------------------------------------
+# Verification sub-agent: independently re-checks claims from QA analysis
+# ---------------------------------------------------------------------------
+from qa_verification import verify_env
 
-# ---------------------------------------------------------------------------
-# SDK workaround: _build_answer_for_generator loses flat dicts (no "content"
-# key) because it does dict.get("content", "").  Convert to JSON string so the
-# SDK takes the string path instead.
-# ---------------------------------------------------------------------------
-import hud.environment.scenarios as _hud_scenarios
+load_dotenv()
 
 _orig_build_answer = _hud_scenarios._build_answer_for_generator
 
@@ -99,11 +104,6 @@ env.add_tool(GeminiReadTool(base_path=BASE_PATH))
 env.add_tool(GeminiSearchTool(base_path=BASE_PATH))
 env.add_tool(GeminiGlobTool(base_path=BASE_PATH))
 env.add_tool(GeminiListTool(base_path=BASE_PATH))
-
-# ---------------------------------------------------------------------------
-# Verification sub-agent: independently re-checks claims from QA analysis
-# ---------------------------------------------------------------------------
-from qa_verification import verify_env
 
 _verify_task = verify_env("verify_claims")
 _VERIFY_MODEL = "claude-sonnet-4-5"

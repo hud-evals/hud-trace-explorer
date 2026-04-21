@@ -3,13 +3,12 @@
 import json as _json
 import re as _re
 from pathlib import Path
-from typing import Any, get_args, get_origin, Literal
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import TypeAdapter
 from pydantic_core import PydanticUndefined
 
-from env import fetch_trace, write_trace_files, download_task_codebase, logger, WORKSPACE_DIR
-
+from env import download_task_codebase, fetch_trace, logger, write_trace_files
 
 # ---------------------------------------------------------------------------
 # Robust answer parsing — handles SDK data-loss, markdown fences, prose, etc.

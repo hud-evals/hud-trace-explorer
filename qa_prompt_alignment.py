@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result
+from qa_common import parse_qa_result, prepare_qa_context
 
 
 class PromptRequirement(BaseModel):
@@ -21,9 +21,7 @@ class PromptAlignmentResult(BaseModel):
         default_factory=list,
         description="Every concrete requirement from the task prompt, with alignment status",
     )
-    prompt_grader_aligned: bool = Field(
-        description="True if the grader checks what the prompt asks for"
-    )
+    prompt_grader_aligned: bool = Field(description="True if the grader checks what the prompt asks for")
     submission_prompt_aligned: bool = Field(
         description="True if the agent's submission addresses what the prompt asks for"
     )
