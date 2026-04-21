@@ -1,5 +1,6 @@
 """False Positive Analysis — detect traces where the agent got undeserved credit."""
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -22,7 +23,7 @@ async def false_positive_analysis(
     hud_api_key: str,
     query: str = "",
     ground_truth: bool | None = None,
-) -> Any:
+) -> AsyncGenerator[Any, None]:
     """Determine whether a passing trace is a false positive."""
     _, _, context = await prepare_qa_context(trace_id, hud_api_key, "False positive analysis")
 

@@ -1,5 +1,6 @@
 """Prompt-Grader Alignment — verify that grader and submission match task requirements."""
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -37,7 +38,7 @@ async def prompt_alignment_analysis(
     trace_id: str,
     hud_api_key: str,
     query: str = "",
-) -> Any:
+) -> AsyncGenerator[Any, None]:
     """Check whether the grader and submission actually match what the task prompt requires."""
     _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Prompt alignment analysis")
 

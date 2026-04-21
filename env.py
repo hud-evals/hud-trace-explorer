@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -1071,7 +1072,7 @@ async def analyze_trace(
     data_sources: list[str] | None = None,
     includes: list[str] | None = None,
     excludes: list[str] | None = None,
-) -> Any:
+) -> AsyncGenerator[Any, None]:
     """Analyze a HUD trace to answer a query.
 
     Args:

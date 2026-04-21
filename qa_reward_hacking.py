@@ -1,5 +1,6 @@
 """Reward Hacking Analysis — detect traces where the agent gamed the evaluation."""
 
+from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -36,7 +37,7 @@ async def reward_hacking_analysis(
     hud_api_key: str,
     query: str = "",
     ground_truth: bool | None = None,
-) -> Any:
+) -> AsyncGenerator[Any, None]:
     """Detect whether the agent gamed the evaluation to achieve its reward."""
     _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Reward hacking analysis")
 

@@ -1,5 +1,6 @@
 """Failure Analysis — identify all problems that caused a trace to fail."""
 
+from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -77,7 +78,7 @@ async def failure_analysis(
     hud_api_key: str,
     query: str = "",
     ground_truth: str | None = None,
-) -> Any:
+) -> AsyncGenerator[Any, None]:
     """Analyze why a trace failed — find all problems, not just a single category."""
     _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Failure analysis")
 

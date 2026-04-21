@@ -1,5 +1,6 @@
 """False Negative Analysis — detect traces where the grader incorrectly failed the agent."""
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -22,7 +23,7 @@ async def false_negative_analysis(
     hud_api_key: str,
     query: str = "",
     ground_truth: bool | None = None,
-) -> Any:
+) -> AsyncGenerator[Any, None]:
     """Determine whether a low-reward trace is a false negative."""
     _, _, context = await prepare_qa_context(trace_id, hud_api_key, "False negative analysis")
 
