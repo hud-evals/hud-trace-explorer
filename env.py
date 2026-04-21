@@ -128,15 +128,16 @@ def _parse_verification_output(text: str) -> dict[str, Any]:
                 claims = []
                 for c in parsed_json["claims"]:
                     if isinstance(c, dict) and "status" in c:
-                        claims.append({
-                            "claim": c.get("claim", ""),
-                            "status": c["status"].upper(),
-                            "reason": c.get("reason", ""),
-                        })
+                        claims.append(
+                            {
+                                "claim": c.get("claim", ""),
+                                "status": c["status"].upper(),
+                                "reason": c.get("reason", ""),
+                            }
+                        )
                 overall = str(parsed_json.get("result", "inconclusive")).lower()
                 refuted = [
-                    {"claim": c["claim"], "reason": c.get("reason", "")}
-                    for c in claims if c["status"] == "REFUTED"
+                    {"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"
                 ]
                 return {
                     "overall": overall,
@@ -161,10 +162,7 @@ def _parse_verification_output(text: str) -> dict[str, Any]:
     overall_m = _re.search(r"RESULT:\s*(CONFIRMED|REJECTED|INCONCLUSIVE)", text, _re.IGNORECASE)
     overall = overall_m.group(1).lower() if overall_m else "inconclusive"
 
-    refuted = [
-        {"claim": c["claim"], "reason": c.get("reason", "")}
-        for c in claims if c["status"] == "REFUTED"
-    ]
+    refuted = [{"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"]
 
     return {
         "overall": overall,
@@ -201,7 +199,12 @@ async def verify_failure_claims(claims: str) -> list[TextContent]:
     from hud.telemetry.instrument import instrument
 
     if not settings.api_key:
-        return [TextContent(type="text", text="ERROR: HUD API key not available for verification subagent. Skipping verification — output your final JSON now.")]
+        return [
+            TextContent(
+                type="text",
+                text="ERROR: HUD API key not available for verification subagent. Skipping verification — output your final JSON now.",
+            )
+        ]
 
     parent_trace_id = get_current_trace_id()
     task = _verify_task.model_copy(update={"args": {"claims": claims}})
@@ -237,7 +240,7 @@ async def verify_failure_claims(claims: str) -> list[TextContent]:
                         summary_parts.append(f"    Reason: {entry['reason']}")
                 summary_parts.append(
                     "\n⚠️ ACTION REQUIRED — STRICT BUDGET: You have at most 3 tool calls remaining."
-                    "\n1. Remove refuted claims OR mark their fault as \"unclear\""
+                    '\n1. Remove refuted claims OR mark their fault as "unclear"'
                     "\n2. Output your final JSON immediately"
                     "\n\nDo NOT re-investigate or re-prove refuted claims. The verifier already"
                     "\nran independent commands — additional investigation is wasted effort."
@@ -695,9 +698,11 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> tuple[list[str],
             if any(kw in tn_lower for kw in ("write", "create", "edit", "replace", "patch")):
                 old_val = inp.get("old_str") or inp.get("old_string") or ""
                 new_val = (
-                    inp.get("file_text") or inp.get("content") or
-                    inp.get("new_str") or inp.get("new_string") or
-                    inp.get("text", "")
+                    inp.get("file_text")
+                    or inp.get("content")
+                    or inp.get("new_str")
+                    or inp.get("new_string")
+                    or inp.get("text", "")
                 )
                 if old_val and new_val:
                     content = f"REPLACED:\n{old_val}\nWITH:\n{new_val}"
@@ -753,12 +758,7 @@ def _extract_scenario_setup(trajectory: list[dict[str, Any]]) -> dict[str, Any]:
     """
     for span in trajectory:
         if span.get("name") == "prompts/get.mcp":
-            args = (
-                span.get("attributes", {})
-                .get("request", {})
-                .get("params", {})
-                .get("arguments", {})
-            )
+            args = span.get("attributes", {}).get("request", {}).get("params", {}).get("arguments", {})
             if args:
                 return {k: _parse_json_or_passthrough(v) for k, v in args.items()}
     return {}
@@ -778,9 +778,7 @@ def _extract_evaluation_results(
     for span in trajectory:
         if span.get("name") != "resources/read.mcp":
             continue
-        for entry in (
-            span.get("attributes", {}).get("result", {}).get("contents", [])
-        ):
+        for entry in span.get("attributes", {}).get("result", {}).get("contents", []):
             try:
                 parsed = json.loads(entry.get("text", ""))
                 if isinstance(parsed, dict):
@@ -981,9 +979,7 @@ async def download_task_codebase(
     import tempfile
 
     api_url = os.environ.get("HUD_API_URL", "https://api.hud.ai")
-    source_url_endpoint = (
-        f"{api_url}/registry/environments/{registry_id}/source-url"
-    )
+    source_url_endpoint = f"{api_url}/registry/environments/{registry_id}/source-url"
     target_dir = WORKSPACE_DIR / "task_codebase"
 
     try:
@@ -995,7 +991,9 @@ async def download_task_codebase(
             if resp.status_code != 200:
                 logger.warning(
                     "source-url returned %d for registry %s: %s",
-                    resp.status_code, registry_id, resp.text,
+                    resp.status_code,
+                    registry_id,
+                    resp.text,
                 )
                 return None
 
@@ -1005,11 +1003,14 @@ async def download_task_codebase(
                 return None
 
             tarball_resp = await client.get(
-                download_url, follow_redirects=True, timeout=120.0,
+                download_url,
+                follow_redirects=True,
+                timeout=120.0,
             )
             if tarball_resp.status_code != 200:
                 logger.warning(
-                    "Tarball download failed with %d", tarball_resp.status_code,
+                    "Tarball download failed with %d",
+                    tarball_resp.status_code,
                 )
                 return None
 
@@ -1022,7 +1023,8 @@ async def download_task_codebase(
 
         logger.info(
             "Extracted environment source (%d bytes) to %s",
-            len(tarball_resp.content), target_dir,
+            len(tarball_resp.content),
+            target_dir,
         )
         return target_dir
 
@@ -1195,10 +1197,11 @@ Be VERY BRIEF - respond with ONE short paragraph that directly answers the quest
         yield 1.0 if response else 0.0
 
 
+import qa_failure_analysis  # noqa: F401, E402
 import qa_false_negative  # noqa: F401, E402
 import qa_false_positive  # noqa: F401, E402
-import qa_failure_analysis  # noqa: F401, E402
-import qa_reward_hacking  # noqa: F401, E402
 import qa_prompt_alignment  # noqa: F401, E402
+import qa_reward_hacking  # noqa: F401, E402
+
 if __name__ == "__main__":
     env.run(transport="stdio")
