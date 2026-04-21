@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result
+from qa_common import parse_qa_result
 
 
 class Problem(BaseModel):
@@ -83,14 +83,30 @@ async def failure_analysis(
     ground_truth: str | None = None,
 ) -> Any:
     """Analyze why a trace failed — find all problems, not just a single category."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Failure analysis")
+    from hud.settings import settings as _hud_settings
+
+    if not _hud_settings.api_key and hud_api_key:
+        _hud_settings.api_key = hud_api_key
 
     user_focus = query.strip() or "Find every problem that contributed to this trace's failure."
 
     prompt = f"""You are a failure analyst. A trace failed or received a low reward. Your job
 is to find **every distinct problem** that contributed to the failure.
 
-{context}
+## Context preparation subagent (MANDATORY)
+
+Before doing any analysis, call `prepare_trace_context` exactly once:
+- `trace_id`: `{trace_id}`
+- `scenario_label`: `Failure analysis`
+
+Use the returned context block as your authoritative guide for:
+- available trace files,
+- file descriptions,
+- recommended reading order,
+- large-file handling.
+
+If this tool returns an error, mention that briefly in your reasoning and continue with
+best-effort analysis from `/workspace/` files.
 
 ## Your goal: find ALL the problems
 

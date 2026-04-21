@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+# ---------------------------------------------------------------------------
+# SDK workaround: _build_answer_for_generator loses flat dicts (no "content"
+# key) because it does dict.get("content", "").  Convert to JSON string so the
+# SDK takes the string path instead.
+# ---------------------------------------------------------------------------
+import hud.environment.scenarios as _hud_scenarios
 from dotenv import load_dotenv
 from httpx import AsyncClient
 from hud import Environment
@@ -37,14 +44,11 @@ from hud.tools.filesystem import (
 )
 from mcp.types import ImageContent, TextContent
 
-load_dotenv()
+# Sub agents
+from qa_context_preparer import prepare_env
+from qa_verification import verify_env
 
-# ---------------------------------------------------------------------------
-# SDK workaround: _build_answer_for_generator loses flat dicts (no "content"
-# key) because it does dict.get("content", "").  Convert to JSON string so the
-# SDK takes the string path instead.
-# ---------------------------------------------------------------------------
-import hud.environment.scenarios as _hud_scenarios
+load_dotenv()
 
 _orig_build_answer = _hud_scenarios._build_answer_for_generator
 
@@ -100,14 +104,87 @@ env.add_tool(GeminiSearchTool(base_path=BASE_PATH))
 env.add_tool(GeminiGlobTool(base_path=BASE_PATH))
 env.add_tool(GeminiListTool(base_path=BASE_PATH))
 
-# ---------------------------------------------------------------------------
-# Verification sub-agent: independently re-checks claims from QA analysis
-# ---------------------------------------------------------------------------
-from qa_verification import verify_env
-
 _verify_task = verify_env("verify_claims")
 _VERIFY_MODEL = "claude-sonnet-4-5"
 _VERIFY_MAX_STEPS = 50
+
+_context_prepare_task = prepare_env("prepare_context")
+_CONTEXT_PREP_MODEL = "claude-sonnet-4-5"
+_CONTEXT_PREP_MAX_STEPS = 25
+
+
+def _parse_context_prep_output(text: str) -> dict[str, Any] | None:
+    """Parse the context-preparer subagent JSON output."""
+    from qa_common import _extract_json_object
+
+    json_str = _extract_json_object(text) if text else None
+    if not json_str:
+        return None
+
+    try:
+        parsed = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("error"):
+        return None
+
+    required = {"trace_data_min", "files_written", "trace_inventory", "available_files", "context_block"}
+    if not required.issubset(parsed.keys()):
+        return None
+
+    return parsed
+
+
+async def prepare_context_with_subagent(
+    trace_id: str,
+    scenario_label: str,
+    data_sources: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run context-preparation subagent and return structured context payload."""
+    from hud.agents import create_agent
+    from hud.eval.context import get_current_trace_id
+    from hud.eval.manager import run_eval
+    from hud.settings import settings
+    from hud.telemetry.instrument import instrument
+
+    requested_sources = data_sources or ["telemetry", "environment", "worker"]
+
+    if not settings.api_key:
+        raise RuntimeError("HUD API key unavailable for context-preparer subagent")
+
+    parent_trace_id = get_current_trace_id()
+    task = _context_prepare_task.model_copy(
+        update={
+            "args": {
+                "trace_id": trace_id,
+                "scenario_label": scenario_label,
+                "data_sources": requested_sources,
+            }
+        }
+    )
+
+    @instrument(category="subagent", name="prepare_context_with_subagent")
+    async def _run_context_preparer() -> dict[str, Any]:
+        async with run_eval(
+            task,
+            trace=False,
+            trace_id=parent_trace_id,
+            quiet=True,
+        ) as ctx:
+            agent = create_agent(_CONTEXT_PREP_MODEL)
+            result = await agent.run(ctx, max_steps=_CONTEXT_PREP_MAX_STEPS)
+            raw_text = result.content if hasattr(result, "content") and result.content else ""
+
+            parsed = _parse_context_prep_output(raw_text)
+            if not parsed:
+                raise RuntimeError("Context-preparer subagent returned invalid payload")
+
+            return parsed
+
+    return await _run_context_preparer()
 
 
 def _parse_verification_output(text: str) -> dict[str, Any]:
@@ -128,15 +205,16 @@ def _parse_verification_output(text: str) -> dict[str, Any]:
                 claims = []
                 for c in parsed_json["claims"]:
                     if isinstance(c, dict) and "status" in c:
-                        claims.append({
-                            "claim": c.get("claim", ""),
-                            "status": c["status"].upper(),
-                            "reason": c.get("reason", ""),
-                        })
+                        claims.append(
+                            {
+                                "claim": c.get("claim", ""),
+                                "status": c["status"].upper(),
+                                "reason": c.get("reason", ""),
+                            }
+                        )
                 overall = str(parsed_json.get("result", "inconclusive")).lower()
                 refuted = [
-                    {"claim": c["claim"], "reason": c.get("reason", "")}
-                    for c in claims if c["status"] == "REFUTED"
+                    {"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"
                 ]
                 return {
                     "overall": overall,
@@ -161,10 +239,7 @@ def _parse_verification_output(text: str) -> dict[str, Any]:
     overall_m = _re.search(r"RESULT:\s*(CONFIRMED|REJECTED|INCONCLUSIVE)", text, _re.IGNORECASE)
     overall = overall_m.group(1).lower() if overall_m else "inconclusive"
 
-    refuted = [
-        {"claim": c["claim"], "reason": c.get("reason", "")}
-        for c in claims if c["status"] == "REFUTED"
-    ]
+    refuted = [{"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"]
 
     return {
         "overall": overall,
@@ -201,7 +276,12 @@ async def verify_failure_claims(claims: str) -> list[TextContent]:
     from hud.telemetry.instrument import instrument
 
     if not settings.api_key:
-        return [TextContent(type="text", text="ERROR: HUD API key not available for verification subagent. Skipping verification — output your final JSON now.")]
+        return [
+            TextContent(
+                type="text",
+                text="ERROR: HUD API key not available for verification subagent. Skipping verification — output your final JSON now.",
+            )
+        ]
 
     parent_trace_id = get_current_trace_id()
     task = _verify_task.model_copy(update={"args": {"claims": claims}})
@@ -237,7 +317,7 @@ async def verify_failure_claims(claims: str) -> list[TextContent]:
                         summary_parts.append(f"    Reason: {entry['reason']}")
                 summary_parts.append(
                     "\n⚠️ ACTION REQUIRED — STRICT BUDGET: You have at most 3 tool calls remaining."
-                    "\n1. Remove refuted claims OR mark their fault as \"unclear\""
+                    '\n1. Remove refuted claims OR mark their fault as "unclear"'
                     "\n2. Output your final JSON immediately"
                     "\n\nDo NOT re-investigate or re-prove refuted claims. The verifier already"
                     "\nran independent commands — additional investigation is wasted effort."
@@ -257,6 +337,42 @@ def get_last_verification_result() -> dict[str, Any] | None:
     result = _last_verification_result
     _last_verification_result = None
     return result
+
+
+@env.tool()
+async def prepare_trace_context(
+    trace_id: str,
+    scenario_label: str,
+) -> list[TextContent]:
+    """Prepare QA trace context via dedicated context subagent.
+
+    HUD API key is read from server-side HUD settings; callers must not pass
+    credentials in tool arguments.
+    """
+    try:
+        prepared = await prepare_context_with_subagent(
+            trace_id=trace_id,
+            scenario_label=scenario_label,
+            data_sources=["telemetry", "environment", "worker"],
+        )
+    except Exception as exc:
+        return [
+            TextContent(
+                type="text",
+                text=(f"ERROR: context preparation subagent failed. Reason: {exc}"),
+            )
+        ]
+
+    context_block = prepared.get("context_block")
+    if isinstance(context_block, str) and context_block.strip():
+        return [TextContent(type="text", text=context_block)]
+
+    return [
+        TextContent(
+            type="text",
+            text="ERROR: context preparation subagent returned empty context_block.",
+        )
+    ]
 
 
 @env.tool()
@@ -695,9 +811,11 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> tuple[list[str],
             if any(kw in tn_lower for kw in ("write", "create", "edit", "replace", "patch")):
                 old_val = inp.get("old_str") or inp.get("old_string") or ""
                 new_val = (
-                    inp.get("file_text") or inp.get("content") or
-                    inp.get("new_str") or inp.get("new_string") or
-                    inp.get("text", "")
+                    inp.get("file_text")
+                    or inp.get("content")
+                    or inp.get("new_str")
+                    or inp.get("new_string")
+                    or inp.get("text", "")
                 )
                 if old_val and new_val:
                     content = f"REPLACED:\n{old_val}\nWITH:\n{new_val}"
@@ -753,12 +871,7 @@ def _extract_scenario_setup(trajectory: list[dict[str, Any]]) -> dict[str, Any]:
     """
     for span in trajectory:
         if span.get("name") == "prompts/get.mcp":
-            args = (
-                span.get("attributes", {})
-                .get("request", {})
-                .get("params", {})
-                .get("arguments", {})
-            )
+            args = span.get("attributes", {}).get("request", {}).get("params", {}).get("arguments", {})
             if args:
                 return {k: _parse_json_or_passthrough(v) for k, v in args.items()}
     return {}
@@ -778,9 +891,7 @@ def _extract_evaluation_results(
     for span in trajectory:
         if span.get("name") != "resources/read.mcp":
             continue
-        for entry in (
-            span.get("attributes", {}).get("result", {}).get("contents", [])
-        ):
+        for entry in span.get("attributes", {}).get("result", {}).get("contents", []):
             try:
                 parsed = json.loads(entry.get("text", ""))
                 if isinstance(parsed, dict):
@@ -981,9 +1092,7 @@ async def download_task_codebase(
     import tempfile
 
     api_url = os.environ.get("HUD_API_URL", "https://api.hud.ai")
-    source_url_endpoint = (
-        f"{api_url}/registry/environments/{registry_id}/source-url"
-    )
+    source_url_endpoint = f"{api_url}/registry/environments/{registry_id}/source-url"
     target_dir = WORKSPACE_DIR / "task_codebase"
 
     try:
@@ -995,7 +1104,9 @@ async def download_task_codebase(
             if resp.status_code != 200:
                 logger.warning(
                     "source-url returned %d for registry %s: %s",
-                    resp.status_code, registry_id, resp.text,
+                    resp.status_code,
+                    registry_id,
+                    resp.text,
                 )
                 return None
 
@@ -1005,11 +1116,14 @@ async def download_task_codebase(
                 return None
 
             tarball_resp = await client.get(
-                download_url, follow_redirects=True, timeout=120.0,
+                download_url,
+                follow_redirects=True,
+                timeout=120.0,
             )
             if tarball_resp.status_code != 200:
                 logger.warning(
-                    "Tarball download failed with %d", tarball_resp.status_code,
+                    "Tarball download failed with %d",
+                    tarball_resp.status_code,
                 )
                 return None
 
@@ -1022,7 +1136,8 @@ async def download_task_codebase(
 
         logger.info(
             "Extracted environment source (%d bytes) to %s",
-            len(tarball_resp.content), target_dir,
+            len(tarball_resp.content),
+            target_dir,
         )
         return target_dir
 
@@ -1195,10 +1310,11 @@ Be VERY BRIEF - respond with ONE short paragraph that directly answers the quest
         yield 1.0 if response else 0.0
 
 
+import qa_failure_analysis  # noqa: F401, E402
 import qa_false_negative  # noqa: F401, E402
 import qa_false_positive  # noqa: F401, E402
-import qa_failure_analysis  # noqa: F401, E402
-import qa_reward_hacking  # noqa: F401, E402
 import qa_prompt_alignment  # noqa: F401, E402
+import qa_reward_hacking  # noqa: F401, E402
+
 if __name__ == "__main__":
     env.run(transport="stdio")

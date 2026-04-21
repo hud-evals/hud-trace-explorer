@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result, normalize_optional_bool
+from qa_common import normalize_optional_bool, parse_qa_result
 
 
 class FalseNegativeResult(BaseModel):
@@ -22,7 +22,10 @@ async def false_negative_analysis(
     ground_truth: bool | None = None,
 ) -> Any:
     """Determine whether a low-reward trace is a false negative."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "False negative analysis")
+    from hud.settings import settings as _hud_settings
+
+    if not _hud_settings.api_key and hud_api_key:
+        _hud_settings.api_key = hud_api_key
 
     user_focus = query.strip() or (
         "Determine whether this trace is a false negative — did the agent "
@@ -113,7 +116,20 @@ evidence** that the agent's work was actually correct.
 8. **Commit to a clear verdict.** Do not hedge with "borderline" — decide yes or no.
    When genuinely uncertain, lean toward "not a false negative" (the reward is justified).
 
-{context}
+## Context preparation subagent (MANDATORY)
+
+Before doing any analysis, call `prepare_trace_context` exactly once:
+- `trace_id`: `{trace_id}`
+- `scenario_label`: `False negative analysis`
+
+Use the returned context block as your authoritative guide for:
+- available trace files,
+- file descriptions,
+- recommended reading order,
+- large-file handling.
+
+If this tool returns an error, mention that briefly in your reasoning and continue with
+best-effort analysis from `/workspace/` files.
 
 ## Focus
 {user_focus}

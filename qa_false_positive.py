@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result, normalize_optional_bool
+from qa_common import normalize_optional_bool, parse_qa_result
 
 
 class FalsePositiveResult(BaseModel):
@@ -22,7 +22,10 @@ async def false_positive_analysis(
     ground_truth: bool | None = None,
 ) -> Any:
     """Determine whether a passing trace is a false positive."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "False positive analysis")
+    from hud.settings import settings as _hud_settings
+
+    if not _hud_settings.api_key and hud_api_key:
+        _hud_settings.api_key = hud_api_key
 
     user_focus = query.strip() or (
         "Determine whether this trace is a false positive — did the agent "
@@ -66,7 +69,20 @@ solve the task. This silently inflates pass rates. Common causes include:
 
 A false positive is NOT when the agent genuinely solved the task.
 
-{context}
+## Context preparation subagent (MANDATORY)
+
+Before doing any analysis, call `prepare_trace_context` exactly once:
+- `trace_id`: `{trace_id}`
+- `scenario_label`: `False positive analysis`
+
+Use the returned context block as your authoritative guide for:
+- available trace files,
+- file descriptions,
+- recommended reading order,
+- large-file handling.
+
+If this tool returns an error, mention that briefly in your reasoning and continue with
+best-effort analysis from `/workspace/` files.
 
 ## Focus
 {user_focus}

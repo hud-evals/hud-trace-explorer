@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result
+from qa_common import parse_qa_result
 
 
 class PromptRequirement(BaseModel):
@@ -21,9 +21,7 @@ class PromptAlignmentResult(BaseModel):
         default_factory=list,
         description="Every concrete requirement from the task prompt, with alignment status",
     )
-    prompt_grader_aligned: bool = Field(
-        description="True if the grader checks what the prompt asks for"
-    )
+    prompt_grader_aligned: bool = Field(description="True if the grader checks what the prompt asks for")
     submission_prompt_aligned: bool = Field(
         description="True if the agent's submission addresses what the prompt asks for"
     )
@@ -41,7 +39,10 @@ async def prompt_alignment_analysis(
     query: str = "",
 ) -> Any:
     """Check whether the grader and submission actually match what the task prompt requires."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Prompt alignment analysis")
+    from hud.settings import settings as _hud_settings
+
+    if not _hud_settings.api_key and hud_api_key:
+        _hud_settings.api_key = hud_api_key
 
     user_focus = query.strip() or (
         "Check whether the task prompt, the grader, and the agent's submission "
@@ -55,6 +56,21 @@ async def prompt_alignment_analysis(
 3. **The agent's submission** — what the agent actually produced
 
 These three SHOULD be aligned, but often are not. Your job is to find the gaps.
+
+## Context preparation subagent (MANDATORY)
+
+Before doing any analysis, call `prepare_trace_context` exactly once:
+- `trace_id`: `{trace_id}`
+- `scenario_label`: `Prompt alignment analysis`
+
+Use the returned context block as your authoritative guide for:
+- available trace files,
+- file descriptions,
+- recommended reading order,
+- large-file handling.
+
+If this tool returns an error, mention that briefly in your reasoning and continue with
+best-effort analysis from `/workspace/` files.
 
 ## Types of misalignment
 
@@ -76,8 +92,6 @@ These three SHOULD be aligned, but often are not. Your job is to find the gaps.
 - The agent and grader agree, but neither matches the prompt. This is the
   most insidious case — it looks like "correct" behavior but the task
   requirements were never actually tested.
-
-{context}
 
 ## Focus
 {user_focus}
