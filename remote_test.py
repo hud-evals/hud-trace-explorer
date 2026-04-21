@@ -3,7 +3,7 @@
 This script tests the deployed environment on HUD platform.
 
 Usage:
-    python remote_test.py
+    uv run python remote_test.py
 """
 
 import asyncio

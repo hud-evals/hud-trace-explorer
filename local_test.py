@@ -1,8 +1,8 @@
 """Local test script for the trace-explorer environment.
 
 Usage:
-    python local_test.py
-    python local_test.py --trace-id <uuid>
+    uv run python local_test.py
+    uv run python local_test.py --trace-id <uuid>
 """
 
 import asyncio
@@ -31,9 +31,9 @@ async def test_analyze_manual():
     print("\n=== Test 2: Analyze (Manual Agent Loop) ===")
 
     from openai import AsyncOpenAI
-    
+
     # Use HUD inference gateway - see all models at https://hud.ai/models
-    client = AsyncOpenAI(base_url="https://inference.hud.ai", api_key=settings.api_key)
+    client = AsyncOpenAI(base_url="https://inference.hud.ai", api_key=HUD_API_KEY)
 
     task = env(
         "analyze",
@@ -103,7 +103,7 @@ async def main():
     if not HUD_API_KEY:
         print("ERROR: HUD_API_KEY not set. Set via environment or hud.ai settings.")
         return
-    
+
     await test_tools_standalone()
     # await test_analyze_manual()
     await test_analyze_agent()

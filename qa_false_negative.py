@@ -5,12 +5,14 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result, normalize_optional_bool
+from qa_common import normalize_optional_bool, parse_qa_result, prepare_qa_context
 
 
 class FalseNegativeResult(BaseModel):
     reasoning: str = Field(description="Step-by-step analysis of whether the grading is correct")
-    is_false_negative: bool = Field(description="True if the agent solved the task but the grader incorrectly scored it as a failure")
+    is_false_negative: bool = Field(
+        description="True if the agent solved the task but the grader incorrectly scored it as a failure"
+    )
     confidence: float = Field(default=0.5, description="Confidence in the verdict, 0.0 to 1.0", ge=0.0, le=1.0)
 
 

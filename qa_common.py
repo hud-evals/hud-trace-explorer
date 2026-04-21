@@ -3,13 +3,12 @@
 import json as _json
 import re as _re
 from pathlib import Path
-from typing import Any, get_args, get_origin, Literal
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import TypeAdapter
 from pydantic_core import PydanticUndefined
 
-from env import fetch_trace, write_trace_files, download_task_codebase, logger, WORKSPACE_DIR
-
+from env import download_task_codebase, fetch_trace, logger, write_trace_files
 
 # ---------------------------------------------------------------------------
 # Robust answer parsing — handles SDK data-loss, markdown fences, prose, etc.
@@ -74,9 +73,7 @@ def _regex_extract_result(text: str, model_cls: type) -> Any | None:
         annotation = field_info.annotation
         origin = get_origin(annotation)
 
-        if annotation is bool or (
-            hasattr(annotation, "__args__") and bool in getattr(annotation, "__args__", ())
-        ):
+        if annotation is bool or (hasattr(annotation, "__args__") and bool in getattr(annotation, "__args__", ())):
             pattern = _re.compile(
                 rf"""(?:"|')?{_re.escape(name)}(?:"|')?\s*[:=]\s*(?:"|')?(true|false)(?:"|')?""",
                 _re.IGNORECASE,
@@ -222,10 +219,11 @@ async def prepare_qa_context(
     Returns (trace_data, files_written, context_block) where context_block
     is a ready-to-embed string with trace metadata and file descriptions.
     """
-    data_sources = ["telemetry", "environment", "worker"]
+    data_sources = ["telemetry"]
 
     # Ensure HUD settings has the API key so subagent create_agent() can resolve models
     from hud.settings import settings as _hud_settings
+
     if not _hud_settings.api_key and hud_api_key:
         _hud_settings.api_key = hud_api_key
 
@@ -261,8 +259,8 @@ async def prepare_qa_context(
         "file_changes": "⚠️ CRITICAL: all files the agent created or edited — shows full content of each modification with BEFORE/AFTER diffs. You MUST read this file and evaluate whether changes solve the actual problem or just target the grading metric",
         "trajectory": "full trajectory spans (LARGE — use grep/bash to search, do NOT read in full)",
         "screenshots_index": "index of available CUA screenshots by step number",
-        "environment_logs": "container / environment logs including grader output (can be LARGE — grep for errors first)",
-        "worker_logs": "orchestrator / rollout worker logs (can be LARGE — grep for errors first)",
+        "environment_logs": "container / environment logs including grader output (fetched on demand via load_trace_sources(['environment']))",
+        "worker_logs": "orchestrator / rollout worker logs (fetched on demand via load_trace_sources(['worker']))",
         "task_codebase": "⚠️ The source code of the task environment — grading logic, scenario definitions, reference solutions, and test suites. Run `ls /workspace/task_codebase/` to explore. Read the grading scripts and any golden solutions inside to understand what correct behavior looks like",
     }
 
@@ -289,6 +287,15 @@ async def prepare_qa_context(
 ## Available files
 
 {chr(10).join(file_lines)}
+
+## Data-loading mode
+
+- Initial load is intentionally lightweight: `telemetry` only.
+- If you need heavy logs, fetch them on demand with the native tool:
+  - `load_trace_sources(["environment"])`
+  - `load_trace_sources(["worker"])`
+  - `load_trace_sources(["environment", "worker"])`
+- You can re-run `load_trace_sources(...)` at any time; it updates files in `/workspace/`.
 
 ## How to access files
 

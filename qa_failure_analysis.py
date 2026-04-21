@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import prepare_qa_context, parse_qa_result
+from qa_common import parse_qa_result, prepare_qa_context
 
 
 class Problem(BaseModel):
@@ -29,13 +29,11 @@ class Problem(BaseModel):
         "semicolons, so the list has 1 element instead of 5'",
     )
     impact: str = Field(
-        description="How this affected the reward (e.g. 'lost 0.5 points because "
-        "cell A2 was checked instead of B1')"
+        description="How this affected the reward (e.g. 'lost 0.5 points because cell A2 was checked instead of B1')"
     )
     fault: Literal["agent", "eval", "platform", "unclear"] = Field(
         default="unclear",
-        description="Who is most responsible. Use 'unclear' when "
-        "reasonable arguments exist for multiple parties",
+        description="Who is most responsible. Use 'unclear' when reasonable arguments exist for multiple parties",
     )
     failure_mode: str = Field(
         default="",
@@ -59,9 +57,7 @@ class FailureAnalysisResult(BaseModel):
         description="Every distinct problem found — one entry per issue, "
         "there can be multiple with different or same fault attributions",
     )
-    confidence: Literal["high", "medium", "low"] = Field(
-        default="medium", description="Confidence in the analysis"
-    )
+    confidence: Literal["high", "medium", "low"] = Field(default="medium", description="Confidence in the analysis")
 
 
 def _normalize_fault(fault: str) -> str:

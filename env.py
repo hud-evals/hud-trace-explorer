@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import hud.environment.scenarios as _hud_scenarios
 from dotenv import load_dotenv
 from httpx import AsyncClient
 from hud import Environment
@@ -37,6 +38,11 @@ from hud.tools.filesystem import (
 )
 from mcp.types import ImageContent, TextContent
 
+# ---------------------------------------------------------------------------
+# Verification sub-agent: independently re-checks claims from QA analysis
+# ---------------------------------------------------------------------------
+from qa_verification import verify_env
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -44,8 +50,6 @@ load_dotenv()
 # key) because it does dict.get("content", "").  Convert to JSON string so the
 # SDK takes the string path instead.
 # ---------------------------------------------------------------------------
-import hud.environment.scenarios as _hud_scenarios
-
 _orig_build_answer = _hud_scenarios._build_answer_for_generator
 
 
@@ -69,6 +73,8 @@ for logger_name in ["httpx", "httpcore"]:
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+VALID_DATA_SOURCES = {"telemetry", "environment", "worker"}
 
 # Workspace directory for trace data
 # In Docker: /workspace exists and is the container workspace
@@ -100,11 +106,6 @@ env.add_tool(GeminiSearchTool(base_path=BASE_PATH))
 env.add_tool(GeminiGlobTool(base_path=BASE_PATH))
 env.add_tool(GeminiListTool(base_path=BASE_PATH))
 
-# ---------------------------------------------------------------------------
-# Verification sub-agent: independently re-checks claims from QA analysis
-# ---------------------------------------------------------------------------
-from qa_verification import verify_env
-
 _verify_task = verify_env("verify_claims")
 _VERIFY_MODEL = "claude-sonnet-4-5"
 _VERIFY_MAX_STEPS = 50
@@ -128,15 +129,16 @@ def _parse_verification_output(text: str) -> dict[str, Any]:
                 claims = []
                 for c in parsed_json["claims"]:
                     if isinstance(c, dict) and "status" in c:
-                        claims.append({
-                            "claim": c.get("claim", ""),
-                            "status": c["status"].upper(),
-                            "reason": c.get("reason", ""),
-                        })
+                        claims.append(
+                            {
+                                "claim": c.get("claim", ""),
+                                "status": c["status"].upper(),
+                                "reason": c.get("reason", ""),
+                            }
+                        )
                 overall = str(parsed_json.get("result", "inconclusive")).lower()
                 refuted = [
-                    {"claim": c["claim"], "reason": c.get("reason", "")}
-                    for c in claims if c["status"] == "REFUTED"
+                    {"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"
                 ]
                 return {
                     "overall": overall,
@@ -161,10 +163,7 @@ def _parse_verification_output(text: str) -> dict[str, Any]:
     overall_m = _re.search(r"RESULT:\s*(CONFIRMED|REJECTED|INCONCLUSIVE)", text, _re.IGNORECASE)
     overall = overall_m.group(1).lower() if overall_m else "inconclusive"
 
-    refuted = [
-        {"claim": c["claim"], "reason": c.get("reason", "")}
-        for c in claims if c["status"] == "REFUTED"
-    ]
+    refuted = [{"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"]
 
     return {
         "overall": overall,
@@ -201,7 +200,12 @@ async def verify_failure_claims(claims: str) -> list[TextContent]:
     from hud.telemetry.instrument import instrument
 
     if not settings.api_key:
-        return [TextContent(type="text", text="ERROR: HUD API key not available for verification subagent. Skipping verification — output your final JSON now.")]
+        return [
+            TextContent(
+                type="text",
+                text="ERROR: HUD API key not available for verification subagent. Skipping verification — output your final JSON now.",
+            )
+        ]
 
     parent_trace_id = get_current_trace_id()
     task = _verify_task.model_copy(update={"args": {"claims": claims}})
@@ -237,7 +241,7 @@ async def verify_failure_claims(claims: str) -> list[TextContent]:
                         summary_parts.append(f"    Reason: {entry['reason']}")
                 summary_parts.append(
                     "\n⚠️ ACTION REQUIRED — STRICT BUDGET: You have at most 3 tool calls remaining."
-                    "\n1. Remove refuted claims OR mark their fault as \"unclear\""
+                    '\n1. Remove refuted claims OR mark their fault as "unclear"'
                     "\n2. Output your final JSON immediately"
                     "\n\nDo NOT re-investigate or re-prove refuted claims. The verifier already"
                     "\nran independent commands — additional investigation is wasted effort."
@@ -301,6 +305,98 @@ async def view_screenshot(step: int) -> list[TextContent | ImageContent]:
     return [
         TextContent(type="text", text=f"Screenshot at step {step}:"),
         ImageContent(type="image", data=data, mimeType=mime),
+    ]
+
+
+@env.tool()
+async def load_trace_sources(data_sources: list[str]) -> list[TextContent]:
+    """Load additional trace sources on demand into /workspace.
+
+    Use this to fetch heavier data only when needed:
+    - telemetry: full trajectory + screenshots
+    - environment: container logs
+    - worker: rollout/orchestrator logs
+    """
+    from hud.settings import settings
+
+    if not data_sources:
+        return [
+            TextContent(
+                type="text",
+                text=("No sources requested. Pass one or more of: ['telemetry', 'environment', 'worker']."),
+            )
+        ]
+
+    requested = []
+    invalid = []
+    for raw in data_sources:
+        source = str(raw).strip().lower()
+        if source in VALID_DATA_SOURCES:
+            if source not in requested:
+                requested.append(source)
+        else:
+            invalid.append(str(raw))
+
+    if invalid:
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    f"Invalid data source(s): {', '.join(invalid)}. Valid options are: telemetry, environment, worker."
+                ),
+            )
+        ]
+
+    api_key = settings.api_key
+    if not api_key:
+        return [
+            TextContent(
+                type="text",
+                text="HUD API key is not available in settings; cannot fetch additional trace sources.",
+            )
+        ]
+
+    metadata_path = WORKSPACE_DIR / "metadata.json"
+    if not metadata_path.exists():
+        return [
+            TextContent(
+                type="text",
+                text="metadata.json not found in /workspace. Run a trace scenario first.",
+            )
+        ]
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [
+            TextContent(
+                type="text",
+                text=f"Failed to parse metadata.json: {exc}",
+            )
+        ]
+
+    trace_id = str(metadata.get("trace_id") or "").strip()
+    if not trace_id:
+        return [
+            TextContent(
+                type="text",
+                text="metadata.json is missing trace_id; cannot fetch additional trace data.",
+            )
+        ]
+
+    logger.info("On-demand source load for trace %s: %s", trace_id, requested)
+    trace_data = await fetch_trace(trace_id, api_key, requested)
+    files_written = await write_trace_files(trace_data, requested)
+
+    listed = sorted(path.name for path in files_written.values())
+    return [
+        TextContent(
+            type="text",
+            text=(
+                f"Loaded sources for trace {trace_id}: {', '.join(requested)}\n"
+                f"Files written/updated ({len(listed)}): {', '.join(listed)}"
+            ),
+        )
     ]
 
 
@@ -695,9 +791,11 @@ def _preprocess_trajectory(trajectory: list[dict[str, Any]]) -> tuple[list[str],
             if any(kw in tn_lower for kw in ("write", "create", "edit", "replace", "patch")):
                 old_val = inp.get("old_str") or inp.get("old_string") or ""
                 new_val = (
-                    inp.get("file_text") or inp.get("content") or
-                    inp.get("new_str") or inp.get("new_string") or
-                    inp.get("text", "")
+                    inp.get("file_text")
+                    or inp.get("content")
+                    or inp.get("new_str")
+                    or inp.get("new_string")
+                    or inp.get("text", "")
                 )
                 if old_val and new_val:
                     content = f"REPLACED:\n{old_val}\nWITH:\n{new_val}"
@@ -753,12 +851,7 @@ def _extract_scenario_setup(trajectory: list[dict[str, Any]]) -> dict[str, Any]:
     """
     for span in trajectory:
         if span.get("name") == "prompts/get.mcp":
-            args = (
-                span.get("attributes", {})
-                .get("request", {})
-                .get("params", {})
-                .get("arguments", {})
-            )
+            args = span.get("attributes", {}).get("request", {}).get("params", {}).get("arguments", {})
             if args:
                 return {k: _parse_json_or_passthrough(v) for k, v in args.items()}
     return {}
@@ -778,9 +871,7 @@ def _extract_evaluation_results(
     for span in trajectory:
         if span.get("name") != "resources/read.mcp":
             continue
-        for entry in (
-            span.get("attributes", {}).get("result", {}).get("contents", [])
-        ):
+        for entry in span.get("attributes", {}).get("result", {}).get("contents", []):
             try:
                 parsed = json.loads(entry.get("text", ""))
                 if isinstance(parsed, dict):
@@ -981,9 +1072,7 @@ async def download_task_codebase(
     import tempfile
 
     api_url = os.environ.get("HUD_API_URL", "https://api.hud.ai")
-    source_url_endpoint = (
-        f"{api_url}/registry/environments/{registry_id}/source-url"
-    )
+    source_url_endpoint = f"{api_url}/registry/environments/{registry_id}/source-url"
     target_dir = WORKSPACE_DIR / "task_codebase"
 
     try:
@@ -995,7 +1084,9 @@ async def download_task_codebase(
             if resp.status_code != 200:
                 logger.warning(
                     "source-url returned %d for registry %s: %s",
-                    resp.status_code, registry_id, resp.text,
+                    resp.status_code,
+                    registry_id,
+                    resp.text,
                 )
                 return None
 
@@ -1005,11 +1096,14 @@ async def download_task_codebase(
                 return None
 
             tarball_resp = await client.get(
-                download_url, follow_redirects=True, timeout=120.0,
+                download_url,
+                follow_redirects=True,
+                timeout=120.0,
             )
             if tarball_resp.status_code != 200:
                 logger.warning(
-                    "Tarball download failed with %d", tarball_resp.status_code,
+                    "Tarball download failed with %d",
+                    tarball_resp.status_code,
                 )
                 return None
 
@@ -1022,7 +1116,8 @@ async def download_task_codebase(
 
         logger.info(
             "Extracted environment source (%d bytes) to %s",
-            len(tarball_resp.content), target_dir,
+            len(tarball_resp.content),
+            target_dir,
         )
         return target_dir
 
@@ -1090,6 +1185,11 @@ async def analyze_trace(
         excludes = []
 
     api_key = hud_api_key
+
+    from hud.settings import settings as _hud_settings
+
+    if not _hud_settings.api_key and hud_api_key:
+        _hud_settings.api_key = hud_api_key
 
     logger.info("Fetching trace %s with sources: %s", trace_id, data_sources)
 
@@ -1195,10 +1295,11 @@ Be VERY BRIEF - respond with ONE short paragraph that directly answers the quest
         yield 1.0 if response else 0.0
 
 
+import qa_failure_analysis  # noqa: F401, E402
 import qa_false_negative  # noqa: F401, E402
 import qa_false_positive  # noqa: F401, E402
-import qa_failure_analysis  # noqa: F401, E402
-import qa_reward_hacking  # noqa: F401, E402
 import qa_prompt_alignment  # noqa: F401, E402
+import qa_reward_hacking  # noqa: F401, E402
+
 if __name__ == "__main__":
     env.run(transport="stdio")
