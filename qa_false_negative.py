@@ -10,7 +10,9 @@ from qa_common import normalize_optional_bool, parse_qa_result, prepare_qa_conte
 
 class FalseNegativeResult(BaseModel):
     reasoning: str = Field(description="Step-by-step analysis of whether the grading is correct")
-    is_false_negative: bool = Field(description="True if the agent solved the task but the grader incorrectly scored it as a failure")
+    is_false_negative: bool = Field(
+        description="True if the agent solved the task but the grader incorrectly scored it as a failure"
+    )
     confidence: float = Field(default=0.5, description="Confidence in the verdict, 0.0 to 1.0", ge=0.0, le=1.0)
 
 

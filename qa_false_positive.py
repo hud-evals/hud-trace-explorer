@@ -10,7 +10,9 @@ from qa_common import normalize_optional_bool, parse_qa_result, prepare_qa_conte
 
 class FalsePositiveResult(BaseModel):
     reasoning: str = Field(description="Step-by-step analysis of whether the agent truly solved the task")
-    is_false_positive: bool = Field(description="True if the agent received credit but didn't actually solve the task correctly")
+    is_false_positive: bool = Field(
+        description="True if the agent received credit but didn't actually solve the task correctly"
+    )
     confidence: float = Field(default=0.5, description="Confidence in the verdict, 0.0 to 1.0", ge=0.0, le=1.0)
 
 

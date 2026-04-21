@@ -11,7 +11,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "ruff==0.11.2"]
+dev = [
+    "pyright>=1.1.408",
+    "pytest>=8.0.0",
+    "ruff==0.11.2",
+]
 
 [build-system]
 requires = ["hatchling"]
