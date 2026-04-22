@@ -211,7 +211,7 @@ def normalize_optional_bool(v: Any) -> bool | None:
 
 async def prepare_qa_context(
     trace_id: str,
-    hud_api_key: str,
+    hud_api_key: str | None,
     scenario_label: str,
 ) -> tuple[dict[str, Any], dict[str, Path], str]:
     """Fetch trace data, write workspace files, and build the shared context block.
@@ -224,18 +224,23 @@ async def prepare_qa_context(
     # Ensure HUD settings has the API key so subagent create_agent() can resolve models
     from hud.settings import settings as _hud_settings
 
-    if not _hud_settings.api_key and hud_api_key:
-        _hud_settings.api_key = hud_api_key
+    api_key = hud_api_key or _hud_settings.api_key
+    if not api_key:
+        raise ValueError(
+            "HUD API key is required. Pass hud_api_key in scenario args or configure HUD_API_KEY in environment settings."
+        )
+    if not _hud_settings.api_key:
+        _hud_settings.api_key = api_key
 
     logger.info("%s for trace %s", scenario_label, trace_id)
 
-    trace_data = await fetch_trace(trace_id, hud_api_key, data_sources)
+    trace_data = await fetch_trace(trace_id, api_key, data_sources)
     files_written = await write_trace_files(trace_data, data_sources)
 
     # Download environment source code if registry_id is available
     registry_id = trace_data.get("registry_id")
     if registry_id:
-        source_dir = await download_task_codebase(registry_id, hud_api_key)
+        source_dir = await download_task_codebase(registry_id, api_key)
         if source_dir:
             files_written["task_codebase"] = source_dir
 

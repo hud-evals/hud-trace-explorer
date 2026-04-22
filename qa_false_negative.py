@@ -19,7 +19,7 @@ class FalseNegativeResult(BaseModel):
 @env.scenario("false_negative_analysis", returns=FalseNegativeResult)
 async def false_negative_analysis(
     trace_id: str,
-    hud_api_key: str,
+    hud_api_key: str | None = None,
     query: str = "",
     ground_truth: bool | None = None,
 ) -> Any:

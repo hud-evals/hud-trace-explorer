@@ -23,7 +23,7 @@ async def test_remote_analyze():
     print("=== Remote Test: Analyze ===")
 
     # Connect to deployed environment
-    env = Environment("trace-explorer").connect_hub("hud-evals/trace-explorer")
+    env = Environment("qa-trace-bench").connect_hub("hud-evals/qa-trace-bench")
 
     task = env(
         "analyze",

@@ -88,7 +88,7 @@ else:
     BASE_PATH = str(WORKSPACE_DIR)
 
 # Create the environment
-env = Environment(name="trace-explorer")
+env = Environment(name="qa-trace-bench")
 
 # Add Claude/OpenCode-style tools (with base_path for sandboxing)
 env.add_tool(BashTool())
@@ -309,8 +309,11 @@ async def view_screenshot(step: int) -> list[TextContent | ImageContent]:
 
 
 @env.tool()
-async def load_trace_sources(data_sources: list[str]) -> list[TextContent]:
+async def load_trace_sources(data_source: str) -> list[TextContent]:
     """Load additional trace sources on demand into /workspace.
+
+    Args:
+        data_source: Which sources to retrieve (Either "telemetry", "environment" or "worker")
 
     Use this to fetch heavier data only when needed:
     - telemetry: full trajectory + screenshots
@@ -319,33 +322,24 @@ async def load_trace_sources(data_sources: list[str]) -> list[TextContent]:
     """
     from hud.settings import settings
 
-    if not data_sources:
+    source = str(data_source or "").strip().lower()
+    if not source:
         return [
             TextContent(
                 type="text",
-                text=("No sources requested. Pass one or more of: ['telemetry', 'environment', 'worker']."),
+                text="No source requested. Pass one of: telemetry, environment, worker.",
             )
         ]
 
-    requested = []
-    invalid = []
-    for raw in data_sources:
-        source = str(raw).strip().lower()
-        if source in VALID_DATA_SOURCES:
-            if source not in requested:
-                requested.append(source)
-        else:
-            invalid.append(str(raw))
-
-    if invalid:
+    if source not in VALID_DATA_SOURCES:
         return [
             TextContent(
                 type="text",
-                text=(
-                    f"Invalid data source(s): {', '.join(invalid)}. Valid options are: telemetry, environment, worker."
-                ),
+                text=(f"Invalid data source: {data_source}. Valid options are: telemetry, environment, worker."),
             )
         ]
+
+    requested = [source]
 
     api_key = settings.api_key
     if not api_key:
@@ -357,6 +351,7 @@ async def load_trace_sources(data_sources: list[str]) -> list[TextContent]:
         ]
 
     metadata_path = WORKSPACE_DIR / "metadata.json"
+    print(f"meatadata path: {metadata_path}")
     if not metadata_path.exists():
         return [
             TextContent(
