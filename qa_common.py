@@ -242,7 +242,8 @@ async def prepare_qa_context(
     status = trace_data.get("status") or "unknown"
     reward = trace_data.get("reward", "unknown")
     error_info = trace_data.get("error") or ""
-    task_prompt = trace_data.get("prompt") or ""
+    # retrieve the prompt either from root or metadata
+    task_prompt = trace_data.get("prompt") or trace_data.get("metadata", {}).get("trace_name") or ""
     scenario = trace_data.get("scenario") or ""
     trajectory_length = trace_data.get("trajectory_length", 0)
 
