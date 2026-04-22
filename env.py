@@ -309,90 +309,102 @@ async def view_screenshot(step: int) -> list[TextContent | ImageContent]:
 
 
 @env.tool()
-async def load_trace_sources(data_source: str) -> list[TextContent]:
-    """Load additional trace sources on demand into /workspace.
-
-    Args:
-        data_source: Which sources to retrieve (Either "telemetry", "environment" or "worker")
-
-    Use this to fetch heavier data only when needed:
-    - telemetry: full trajectory + screenshots
-    - environment: container logs
-    - worker: rollout/orchestrator logs
-    """
+async def load_trace_sources(
+    trace_id: str,
+    data_sources: list[str] | None = None,
+) -> dict[str, Any]:
+    """Load telemetry/environment/worker trace sources and write workspace files."""
     from hud.settings import settings
 
-    source = str(data_source or "").strip().lower()
-    if not source:
-        return [
-            TextContent(
-                type="text",
-                text="No source requested. Pass one of: telemetry, environment, worker.",
-            )
-        ]
-
-    if source not in VALID_DATA_SOURCES:
-        return [
-            TextContent(
-                type="text",
-                text=(f"Invalid data source: {data_source}. Valid options are: telemetry, environment, worker."),
-            )
-        ]
-
-    requested = [source]
+    from env import download_task_codebase, fetch_trace, logger, write_trace_files
 
     api_key = settings.api_key
     if not api_key:
-        return [
-            TextContent(
-                type="text",
-                text="HUD API key is not available in settings; cannot fetch additional trace sources.",
-            )
-        ]
+        raise RuntimeError("HUD API key unavailable for context-preparer")
 
-    metadata_path = WORKSPACE_DIR / "metadata.json"
-    print(f"meatadata path: {metadata_path}")
-    if not metadata_path.exists():
-        return [
-            TextContent(
-                type="text",
-                text="metadata.json not found in /workspace. Run a trace scenario first.",
-            )
-        ]
+    requested_sources = data_sources or ["telemetry", "environment", "worker"]
 
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return [
-            TextContent(
-                type="text",
-                text=f"Failed to parse metadata.json: {exc}",
-            )
-        ]
+    logger.info("Loading trace sources for context prep: trace=%s, sources=%s", trace_id, requested_sources)
 
-    trace_id = str(metadata.get("trace_id") or "").strip()
-    if not trace_id:
-        return [
-            TextContent(
-                type="text",
-                text="metadata.json is missing trace_id; cannot fetch additional trace data.",
-            )
-        ]
+    trace_data = await fetch_trace(trace_id, api_key, requested_sources)
+    files_written = await write_trace_files(trace_data, requested_sources)
 
-    logger.info("On-demand source load for trace %s: %s", trace_id, requested)
-    trace_data = await fetch_trace(trace_id, api_key, requested)
-    files_written = await write_trace_files(trace_data, requested)
+    registry_id = trace_data.get("registry_id")
+    if registry_id:
+        source_dir = await download_task_codebase(str(registry_id), api_key)
+        if source_dir:
+            files_written["task_codebase"] = source_dir
 
-    listed = sorted(path.name for path in files_written.values())
-    return [
-        TextContent(
-            type="text",
-            text=(
-                f"Loaded sources for trace {trace_id}: {', '.join(requested)}\n"
-                f"Files written/updated ({len(listed)}): {', '.join(listed)}"
-            ),
-        )
+    trace_data_min = {
+        "trace_id": trace_data.get("trace_id") or trace_id,
+        "scenario": trace_data.get("scenario") or "",
+        "status": trace_data.get("status") or "unknown",
+        "reward": trace_data.get("reward", "unknown"),
+        "error": trace_data.get("error") or "",
+        "prompt": trace_data.get("prompt") or "",
+        "trajectory_length": trace_data.get("trajectory_length", 0),
+    }
+
+    available_files = [
+        {
+            "key": key,
+            "name": path.name,
+            "path": str(path),
+        }
+        for key, path in files_written.items()
     ]
+
+    return {
+        "trace_data_min": trace_data_min,
+        "sources_loaded": requested_sources,
+        "available_files": available_files,
+        "files_written": {key: str(path) for key, path in files_written.items()},
+        "trace_inventory": _inventory_summary(trace_data, files_written, requested_sources),
+    }
+
+
+def _inventory_summary(
+    trace_data: dict[str, Any], files_written: dict[str, Path], data_sources: list[str]
+) -> list[str]:
+    """Build a concise inventory of available trace material."""
+    lines: list[str] = []
+
+    trajectory_len = int(trace_data.get("trajectory_length") or 0)
+    if "telemetry" in data_sources and trajectory_len > 0:
+        lines.append(f"telemetry trajectory with {trajectory_len} spans")
+    elif "telemetry" in data_sources:
+        lines.append("telemetry source requested (no trajectory spans returned)")
+
+    if "environment" in data_sources:
+        log_count = int(trace_data.get("logs_count") or 0)
+        lines.append(f"environment logs ({log_count} entries)")
+
+    if "worker" in data_sources:
+        rollout_logs = trace_data.get("rollout_logs")
+        if isinstance(rollout_logs, str) and rollout_logs.strip():
+            lines.append("worker rollout logs")
+        else:
+            lines.append("worker source requested (no rollout logs returned)")
+
+    if trace_data.get("scenario_code"):
+        lines.append("scenario source code")
+
+    if trace_data.get("prompt"):
+        lines.append("task prompt text")
+
+    if trace_data.get("error"):
+        lines.append("trace-level error details")
+
+    if "evaluation_result" in files_written:
+        lines.append("evaluation output with grader verdicts")
+
+    if "file_changes" in files_written:
+        lines.append("agent file modifications with before/after content")
+
+    if "task_codebase" in files_written:
+        lines.append("task codebase (grader logic, tests, references)")
+
+    return lines
 
 
 async def fetch_trace(
