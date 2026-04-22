@@ -151,7 +151,7 @@ grading scripts, scenario configs, or task definitions all provide useful ground
 Do NOT skip this step.
 
 ## Analysis steps (after reading task_codebase)
-1. Check the evaluation result for reward breakdown and subscore details.
+1. Check the evaluation result for reward breakdown and subscore details. Also check whether the agent was cut off mid-investigation (vs. finishing cleanly) by looking at the tail of `trajectory_summary.txt` — if so, report as its own problem.
 2. Read the scenario setup — grading criteria, rubric, grader scripts, and expected answers.
 3. **Critically evaluate each grader**: Does the rubric match what the prompt actually asked? Are the
    expected answers reasonable? Could a correct solution be rejected by this grader? Is the grader
@@ -168,10 +168,9 @@ Do NOT skip this step.
    agent's code that produced the wrong behavior. Use `grep` to extract the relevant code
    snippet from `file_changes.txt`. A developer reading your root cause should be able to
    fix the bug without re-investigating.
-9. **Evaluate the agent's strategy, not just its code.** Did the agent run the test suite
-   before submitting? Did it verify its own work against the grading criteria? If the grading
-   mechanism (e.g. pytest, bash checks) was available and the agent never ran it, that is a
-   separate strategic failure worth reporting.
+9. **Evaluate the agent's strategy.** Did the agent verify its work before
+   stopping, or stop early? Skipping available self-checks is a strategic
+   failure worth reporting.
 
 ## Evidence standard
 
