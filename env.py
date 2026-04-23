@@ -89,7 +89,7 @@ else:
     BASE_PATH = str(WORKSPACE_DIR)
 
 # Create the environment
-env = Environment(name="trace-explorer")
+env = Environment(name="qa-trace-bench")
 
 # Add Claude/OpenCode-style tools (with base_path for sandboxing)
 env.add_tool(BashTool())
@@ -112,214 +112,6 @@ env.add_tool(GeminiListTool(base_path=BASE_PATH))
 _verify_task = verify_env("verify_claims")
 _VERIFY_MODEL = "claude-sonnet-4-5"
 _VERIFY_MAX_STEPS = 50
-
-# Alignment
-_alignment_extract_task = alignment_env("extract_prompt_requirements")
-_alignment_grader_task = alignment_env("map_grader_checks")
-_alignment_submission_task = alignment_env("assess_submission_coverage")
-_alignment_arbiter_task = alignment_env("arbitrate_alignment")
-_ALIGNMENT_MODEL = "claude-sonnet-4-5"
-_ALIGNMENT_MAX_STEPS = 50
-
-
-def _parse_verification_output(text: str) -> dict[str, Any]:
-    """Parse the verifier's structured output into claim statuses and overall verdict.
-
-    Tries JSON extraction first (more robust), falls back to regex on the
-    legacy markdown format.
-    """
-    import re as _re
-
-    from qa_common import _extract_json_object
-
-    json_str = _extract_json_object(text) if text else None
-    if json_str:
-        try:
-            parsed_json = json.loads(json_str)
-            if isinstance(parsed_json, dict) and "claims" in parsed_json:
-                claims = []
-                for c in parsed_json["claims"]:
-                    if isinstance(c, dict) and "status" in c:
-                        claims.append(
-                            {
-                                "claim": c.get("claim", ""),
-                                "status": c["status"].upper(),
-                                "reason": c.get("reason", ""),
-                            }
-                        )
-                overall = str(parsed_json.get("result", "inconclusive")).lower()
-                refuted = [
-                    {"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"
-                ]
-                return {
-                    "overall": overall,
-                    "claims": claims,
-                    "refuted": refuted,
-                    "verified_count": sum(1 for c in claims if c["status"] == "VERIFIED"),
-                    "refuted_count": len(refuted),
-                    "unverified_count": sum(1 for c in claims if c["status"] == "UNVERIFIED"),
-                }
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
-
-    claims: list[dict[str, str]] = []
-    for m in _re.finditer(
-        r"###\s*Claim:\s*(.+?)\n"
-        r".*?\*\*Status:\*\*\s*(VERIFIED|REFUTED|UNVERIFIED)",
-        text,
-        _re.DOTALL,
-    ):
-        claims.append({"claim": m.group(1).strip(), "status": m.group(2).upper()})
-
-    overall_m = _re.search(r"RESULT:\s*(CONFIRMED|REJECTED|INCONCLUSIVE)", text, _re.IGNORECASE)
-    overall = overall_m.group(1).lower() if overall_m else "inconclusive"
-
-    refuted = [{"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"]
-
-    return {
-        "overall": overall,
-        "claims": claims,
-        "refuted": refuted,
-        "verified_count": sum(1 for c in claims if c["status"] == "VERIFIED"),
-        "refuted_count": len(refuted),
-        "unverified_count": sum(1 for c in claims if c["status"] == "UNVERIFIED"),
-    }
-
-
-def _parse_subagent_json(text: str) -> dict[str, Any] | None:
-    """Extract and parse a JSON object from a subagent response."""
-    from qa_common import _extract_json_object
-
-    if not text:
-        return None
-
-    json_str = _extract_json_object(text)
-    if not json_str:
-        return None
-
-    try:
-        parsed = json.loads(json_str)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-    return parsed if isinstance(parsed, dict) else None
-
-
-async def _run_alignment_subagent(
-    subagent_name: str,
-    task_template: Any,
-    args: dict[str, Any],
-    parent_trace_id: str,
-) -> tuple[dict[str, Any] | None, str]:
-    """Run one alignment subtask and return (parsed_json, raw_text)."""
-    from hud.agents import create_agent
-    from hud.eval.manager import run_eval
-    from hud.telemetry.instrument import instrument
-
-    task = task_template.model_copy(update={"args": args})
-
-    @instrument(category="subagent", name=subagent_name)
-    async def _run_subagent() -> tuple[dict[str, Any] | None, str]:
-        async with run_eval(task, trace=False, trace_id=parent_trace_id, quiet=True) as ctx:
-            agent = create_agent(_ALIGNMENT_MODEL)
-            result = await agent.run(ctx, max_steps=_ALIGNMENT_MAX_STEPS)
-            raw_text = result.content if hasattr(result, "content") and result.content else ""
-            return _parse_subagent_json(raw_text), raw_text
-
-    return await _run_subagent()
-
-
-async def _run_alignment_phase_tool(
-    phase_name: str,
-    task_template: Any,
-    args: dict[str, Any],
-) -> list[TextContent]:
-    """Shared wrapper for running one alignment subagent phase as a tool."""
-    from hud.eval.context import get_current_trace_id
-    from hud.settings import settings
-
-    if not settings.api_key:
-        return [
-            TextContent(
-                type="text",
-                text='{"error":"HUD API key not available for alignment subagents"}',
-            )
-        ]
-
-    parent_trace_id = get_current_trace_id()
-    # we don't expect the parent trace id to be None
-    assert parent_trace_id is not None
-    data, raw = await _run_alignment_subagent(phase_name, task_template, args, parent_trace_id)
-    if data is None:
-        return [
-            TextContent(
-                type="text",
-                text=json.dumps(
-                    {
-                        "error": f"Subagent phase failed: {phase_name}",
-                        "debug": raw,
-                    },
-                    ensure_ascii=True,
-                ),
-            )
-        ]
-
-    return [TextContent(type="text", text=json.dumps(data, ensure_ascii=True))]
-
-
-@env.tool()
-async def extract_prompt_requirements_subagent(user_focus: str = "") -> list[TextContent]:
-    """Run Subagent: extract atomic requirements from prompt.txt."""
-    focus = user_focus.strip() or "Extract every concrete, testable requirement from the task prompt."
-    return await _run_alignment_phase_tool(
-        "extract_prompt_requirements",
-        _alignment_extract_task,
-        {"user_focus": focus},
-    )
-
-
-@env.tool()
-async def map_grader_checks_subagent(requirements_json: str, user_focus: str = "") -> list[TextContent]:
-    """Run Subagent: map requirements to grader checks."""
-    focus = user_focus.strip() or "Map each requirement to concrete grader checks."
-    return await _run_alignment_phase_tool(
-        "map_grader_checks",
-        _alignment_grader_task,
-        {"requirements_json": requirements_json, "user_focus": focus},
-    )
-
-
-@env.tool()
-async def assess_submission_coverage_subagent(requirements_json: str, user_focus: str = "") -> list[TextContent]:
-    """Run Subagent: map requirements to submission coverage."""
-    focus = user_focus.strip() or "Determine which prompt requirements the submission actually met."
-    return await _run_alignment_phase_tool(
-        "assess_submission_coverage",
-        _alignment_submission_task,
-        {"requirements_json": requirements_json, "user_focus": focus},
-    )
-
-
-@env.tool()
-async def arbitrate_alignment_subagent(
-    requirements_json: str,
-    grader_mapping_json: str,
-    submission_mapping_json: str,
-    user_focus: str = "",
-) -> list[TextContent]:
-    """Run Subagent: arbitrate final alignment verdict."""
-    focus = user_focus.strip() or "Produce final prompt-grader-submission alignment verdict."
-    return await _run_alignment_phase_tool(
-        "arbitrate_alignment",
-        _alignment_arbiter_task,
-        {
-            "requirements_json": requirements_json,
-            "grader_mapping_json": grader_mapping_json,
-            "submission_mapping_json": submission_mapping_json,
-            "user_focus": focus,
-        },
-    )
-
 
 _last_verification_result: dict[str, Any] | None = None
 
@@ -407,6 +199,327 @@ def get_last_verification_result() -> dict[str, Any] | None:
     result = _last_verification_result
     _last_verification_result = None
     return result
+
+
+# Alignment
+_alignment_extract_task = alignment_env("extract_prompt_requirements")
+_alignment_grader_task = alignment_env("map_grader_checks")
+_alignment_submission_task = alignment_env("assess_submission_coverage")
+_alignment_arbiter_task = alignment_env("arbitrate_alignment")
+_ALIGNMENT_MODEL = "claude-sonnet-4-5"
+_ALIGNMENT_MAX_STEPS = 50
+
+_last_extract_prompt_requirements_result: dict[str, Any] | None = None
+_last_map_grader_checks_result: dict[str, Any] | None = None
+_last_assess_submission_coverage_result: dict[str, Any] | None = None
+_last_arbitrate_alignment_result: dict[str, Any] | None = None
+
+
+def get_last_extract_prompt_requirements_result() -> dict[str, Any] | None:
+    """Return the most recent extract_prompt_requirements result, then clear it."""
+    global _last_extract_prompt_requirements_result
+    result = _last_extract_prompt_requirements_result
+    _last_extract_prompt_requirements_result = None
+    return result
+
+
+def get_last_map_grader_checks_result() -> dict[str, Any] | None:
+    """Return the most recent map_grader_checks result, then clear it."""
+    global _last_map_grader_checks_result
+    result = _last_map_grader_checks_result
+    _last_map_grader_checks_result = None
+    return result
+
+
+def get_last_assess_submission_coverage_result() -> dict[str, Any] | None:
+    """Return the most recent assess_submission_coverage result, then clear it."""
+    global _last_assess_submission_coverage_result
+    result = _last_assess_submission_coverage_result
+    _last_assess_submission_coverage_result = None
+    return result
+
+
+def get_last_arbitrate_alignment_result() -> dict[str, Any] | None:
+    """Return the most recent arbitrate_alignment result, then clear it."""
+    global _last_arbitrate_alignment_result
+    result = _last_arbitrate_alignment_result
+    _last_arbitrate_alignment_result = None
+    return result
+
+
+def _parse_verification_output(text: str) -> dict[str, Any]:
+    """Parse the verifier's structured output into claim statuses and overall verdict.
+
+    Tries JSON extraction first (more robust), falls back to regex on the
+    legacy markdown format.
+    """
+    import re as _re
+
+    from qa_common import _extract_json_object
+
+    json_str = _extract_json_object(text) if text else None
+    if json_str:
+        try:
+            parsed_json = json.loads(json_str)
+            if isinstance(parsed_json, dict) and "claims" in parsed_json:
+                claims = []
+                for c in parsed_json["claims"]:
+                    if isinstance(c, dict) and "status" in c:
+                        claims.append(
+                            {
+                                "claim": c.get("claim", ""),
+                                "status": c["status"].upper(),
+                                "reason": c.get("reason", ""),
+                            }
+                        )
+                overall = str(parsed_json.get("result", "inconclusive")).lower()
+                refuted = [
+                    {"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"
+                ]
+                return {
+                    "overall": overall,
+                    "claims": claims,
+                    "refuted": refuted,
+                    "verified_count": sum(1 for c in claims if c["status"] == "VERIFIED"),
+                    "refuted_count": len(refuted),
+                    "unverified_count": sum(1 for c in claims if c["status"] == "UNVERIFIED"),
+                }
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+
+    claims: list[dict[str, str]] = []
+    for m in _re.finditer(
+        r"###\s*Claim:\s*(.+?)\n"
+        r".*?\*\*Status:\*\*\s*(VERIFIED|REFUTED|UNVERIFIED)",
+        text,
+        _re.DOTALL,
+    ):
+        claims.append({"claim": m.group(1).strip(), "status": m.group(2).upper()})
+
+    overall_m = _re.search(r"RESULT:\s*(CONFIRMED|REJECTED|INCONCLUSIVE)", text, _re.IGNORECASE)
+    overall = overall_m.group(1).lower() if overall_m else "inconclusive"
+
+    refuted = [{"claim": c["claim"], "reason": c.get("reason", "")} for c in claims if c["status"] == "REFUTED"]
+
+    return {
+        "overall": overall,
+        "claims": claims,
+        "refuted": refuted,
+        "verified_count": sum(1 for c in claims if c["status"] == "VERIFIED"),
+        "refuted_count": len(refuted),
+        "unverified_count": sum(1 for c in claims if c["status"] == "UNVERIFIED"),
+    }
+
+
+def _parse_subagent_json(text: str) -> dict[str, Any] | None:
+    """Extract and parse a JSON object from a subagent response."""
+    from qa_common import _extract_json_object
+
+    if not text:
+        return None
+
+    json_str = _extract_json_object(text)
+    if not json_str:
+        return None
+
+    try:
+        parsed = json.loads(json_str)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    return parsed if isinstance(parsed, dict) else None
+
+
+@env.tool()
+async def extract_prompt_requirements_subagent(user_focus: str = "") -> dict[str, Any]:
+    """Run Subagent: extract atomic requirements from prompt.txt."""
+    global _last_extract_prompt_requirements_result
+
+    from hud.agents import create_agent
+    from hud.eval.context import get_current_trace_id
+    from hud.eval.manager import run_eval
+    from hud.settings import settings
+    from hud.telemetry.instrument import instrument
+
+    if not settings.api_key:
+        return {"error": "HUD API key not available for alignment subagents"}
+
+    parent_trace_id = get_current_trace_id()
+    focus = user_focus.strip() or "Extract every concrete, testable requirement from the task prompt."
+    task = _alignment_extract_task.model_copy(update={"args": {"user_focus": focus}})
+
+    @instrument(category="subagent", name="extract_prompt_requirements")
+    async def _run_subagent() -> dict[str, Any]:
+        global _last_extract_prompt_requirements_result
+
+        async with run_eval(task, trace=False, trace_id=parent_trace_id, quiet=True) as ctx:
+            agent = create_agent(_ALIGNMENT_MODEL)
+            result = await agent.run(ctx, max_steps=_ALIGNMENT_MAX_STEPS)
+            raw_text = result.content if hasattr(result, "content") and result.content else ""
+
+            parsed = _parse_subagent_json(raw_text)
+            if parsed is None:
+                _last_extract_prompt_requirements_result = None
+                return {
+                    "error": "Subagent phase failed: extract_prompt_requirements",
+                    "debug": raw_text,
+                }
+
+            _last_extract_prompt_requirements_result = parsed
+            return parsed
+
+    return await _run_subagent()
+
+
+@env.tool()
+async def map_grader_checks_subagent(requirements_json: str, user_focus: str = "") -> dict[str, Any]:
+    """Run Subagent: map requirements to grader checks."""
+    global _last_map_grader_checks_result
+
+    from hud.agents import create_agent
+    from hud.eval.context import get_current_trace_id
+    from hud.eval.manager import run_eval
+    from hud.settings import settings
+    from hud.telemetry.instrument import instrument
+
+    if not settings.api_key:
+        return {"error": "HUD API key not available for alignment subagents"}
+
+    parent_trace_id = get_current_trace_id()
+    focus = user_focus.strip() or "Map each requirement to concrete grader checks."
+    task = _alignment_grader_task.model_copy(
+        update={
+            "args": {
+                "requirements_json": requirements_json,
+                "user_focus": focus,
+            }
+        }
+    )
+
+    @instrument(category="subagent", name="map_grader_checks")
+    async def _run_subagent() -> dict[str, Any]:
+        global _last_map_grader_checks_result
+
+        async with run_eval(task, trace=False, trace_id=parent_trace_id, quiet=True) as ctx:
+            agent = create_agent(_ALIGNMENT_MODEL)
+            result = await agent.run(ctx, max_steps=_ALIGNMENT_MAX_STEPS)
+            raw_text = result.content if hasattr(result, "content") and result.content else ""
+
+            parsed = _parse_subagent_json(raw_text)
+            if parsed is None:
+                _last_map_grader_checks_result = None
+                return {
+                    "error": "Subagent phase failed: map_grader_checks",
+                    "debug": raw_text,
+                }
+
+            _last_map_grader_checks_result = parsed
+            return parsed
+
+    return await _run_subagent()
+
+
+@env.tool()
+async def assess_submission_coverage_subagent(requirements_json: str, user_focus: str = "") -> dict[str, Any]:
+    """Run Subagent: map requirements to submission coverage."""
+    global _last_assess_submission_coverage_result
+
+    from hud.agents import create_agent
+    from hud.eval.context import get_current_trace_id
+    from hud.eval.manager import run_eval
+    from hud.settings import settings
+    from hud.telemetry.instrument import instrument
+
+    if not settings.api_key:
+        return {"error": "HUD API key not available for alignment subagents"}
+
+    parent_trace_id = get_current_trace_id()
+    focus = user_focus.strip() or "Determine which prompt requirements the submission actually met."
+    task = _alignment_submission_task.model_copy(
+        update={
+            "args": {
+                "requirements_json": requirements_json,
+                "user_focus": focus,
+            }
+        }
+    )
+
+    @instrument(category="subagent", name="assess_submission_coverage")
+    async def _run_subagent() -> dict[str, Any]:
+        global _last_assess_submission_coverage_result
+
+        async with run_eval(task, trace=False, trace_id=parent_trace_id, quiet=True) as ctx:
+            agent = create_agent(_ALIGNMENT_MODEL)
+            result = await agent.run(ctx, max_steps=_ALIGNMENT_MAX_STEPS)
+            raw_text = result.content if hasattr(result, "content") and result.content else ""
+
+            parsed = _parse_subagent_json(raw_text)
+            if parsed is None:
+                _last_assess_submission_coverage_result = None
+                return {
+                    "error": "Subagent phase failed: assess_submission_coverage",
+                    "debug": raw_text,
+                }
+
+            _last_assess_submission_coverage_result = parsed
+            return parsed
+
+    return await _run_subagent()
+
+
+@env.tool()
+async def arbitrate_alignment_subagent(
+    requirements_json: str,
+    grader_mapping_json: str,
+    submission_mapping_json: str,
+    user_focus: str = "",
+) -> dict[str, Any]:
+    """Run Subagent: arbitrate final alignment verdict."""
+    global _last_arbitrate_alignment_result
+
+    from hud.agents import create_agent
+    from hud.eval.context import get_current_trace_id
+    from hud.eval.manager import run_eval
+    from hud.settings import settings
+    from hud.telemetry.instrument import instrument
+
+    if not settings.api_key:
+        return {"error": "HUD API key not available for alignment subagents"}
+
+    parent_trace_id = get_current_trace_id()
+    focus = user_focus.strip() or "Produce final prompt-grader-submission alignment verdict."
+    task = _alignment_arbiter_task.model_copy(
+        update={
+            "args": {
+                "requirements_json": requirements_json,
+                "grader_mapping_json": grader_mapping_json,
+                "submission_mapping_json": submission_mapping_json,
+                "user_focus": focus,
+            }
+        }
+    )
+
+    @instrument(category="subagent", name="arbitrate_alignment")
+    async def _run_subagent() -> dict[str, Any]:
+        global _last_arbitrate_alignment_result
+
+        async with run_eval(task, trace=False, trace_id=parent_trace_id, quiet=True) as ctx:
+            agent = create_agent(_ALIGNMENT_MODEL)
+            result = await agent.run(ctx, max_steps=_ALIGNMENT_MAX_STEPS)
+            raw_text = result.content if hasattr(result, "content") and result.content else ""
+
+            parsed = _parse_subagent_json(raw_text)
+            if parsed is None:
+                _last_arbitrate_alignment_result = None
+                return {
+                    "error": "Subagent phase failed: arbitrate_alignment",
+                    "debug": raw_text,
+                }
+
+            _last_arbitrate_alignment_result = parsed
+            return parsed
+
+    return await _run_subagent()
 
 
 @env.tool()
