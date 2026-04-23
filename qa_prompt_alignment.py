@@ -51,20 +51,22 @@ async def prompt_alignment_analysis(
 
 {user_focus}
 
-You have direct access to specialized subagent tools. Use them at your discretion
-to keep context clean and focused:
+You have direct access to specialized subagent tools:
 - `extract_prompt_requirements_subagent(user_focus)`
 - `map_grader_checks_subagent(requirements_json, user_focus)`
 - `assess_submission_coverage_subagent(requirements_json, user_focus)`
 - `arbitrate_alignment_subagent(requirements_json, grader_mapping_json, submission_mapping_json, user_focus)`
 
-Recommended flow (adapt as needed):
-1. Extract requirements.
-2. Map grader checks and submission coverage in either order.
-3. Arbitrate final verdict.
+Default execution protocol (do this unless a tool is unavailable):
+1. Run `extract_prompt_requirements_subagent`.
+2. Run `map_grader_checks_subagent` and `assess_submission_coverage_subagent`.
+3. Run `arbitrate_alignment_subagent`.
+4. If the provisional verdict is `is_prompt_misaligned=true`, run one rebuttal pass:
+   re-check whether grader checks can be valid causal proxies and whether repro-harness
+   differences are merely implementation details for the same contract.
 
-If a subagent output is malformed/incomplete, minimally repair or re-run that phase.
-Only do broad manual exploration if subagent outputs are unusable.
+If a subagent output is malformed/incomplete, minimally repair or retry that phase once.
+Only do broad manual exploration if subagent outputs are unusable after retry.
 
 {context}
 
@@ -72,6 +74,9 @@ Decision policy:
 - Weigh evidence symmetrically. Do not default toward aligned or misaligned.
 - Count only signals backed by quotes/evidence.
 - If evidence is genuinely mixed, keep confidence near 0.5.
+- Treat prompt requirements as two tiers:
+  - Core acceptance requirements: determine pass/fail behavior.
+  - Supporting/context requirements: useful context, but not enough alone to call misalignment.
 
 Misalignment signals (toward `is_prompt_misaligned=true`):
 - Out-of-scope grader checks not implied by prompt requirements.

@@ -29,6 +29,13 @@ class ExtractedRequirement(BaseModel):
     id: str = Field(description="Requirement identifier (R1, R2, ...)")
     requirement: str = Field(description="Atomic, testable prompt requirement")
     explicit: bool = Field(description="Whether requirement is explicitly stated")
+    tier: Literal["core_acceptance", "supporting_context"] = Field(
+        default="core_acceptance",
+        description=(
+            "core_acceptance: directly determines whether task is solved; "
+            "supporting_context: contextual/process detail that should not alone force misalignment"
+        ),
+    )
     type: Literal["functional", "format", "location", "constraint", "process"] = Field(
         description="Requirement category"
     )
@@ -112,6 +119,9 @@ Extraction rules:
 - Split combined statements into separate atomic requirements.
 - Keep each requirement independently checkable.
 - Every requirement must have a direct quote from prompt.txt as evidence.
+- Classify each requirement as:
+  - `core_acceptance`: directly determines success/failure of the requested fix/outcome.
+  - `supporting_context`: reproduction guidance, narrative context, or non-gating detail.
 
 Focus:
 {user_focus}
@@ -123,6 +133,7 @@ Return ONLY this JSON object:
       "id": "R1",
       "requirement": "atomic, testable requirement",
       "explicit": true,
+      "tier": "core_acceptance | supporting_context",
       "type": "functional | format | location | constraint | process",
       "quote": "exact quote from prompt.txt",
       "evidence": "prompt.txt snippet proving this requirement"
@@ -158,11 +169,15 @@ Inputs:
 Files you should use:
 - `/workspace/scenario_setup.json`
 - `/workspace/evaluation_result.json`
-- targeted files in `/workspace/task_codebase/` only when needed to resolve grader logic
 
 Scope rules:
 - Do not read `/workspace/file_changes.txt` or `/workspace/trajectory_summary.txt`.
 - Do not decide whether the agent met requirements; only grader coverage.
+- Do not read `/workspace/scenario_code.py`.
+- Do not attempt to decrypt grader `source` strings.
+- Do not inspect `/tmp/grader_*.py` or reconstruct grader scripts from encoded blobs.
+- Treat grader source as opaque; use only declared grader names/metadata and
+  observed behavior in `evaluation_result.json`.
 
 Method:
 1. Identify grader commands/scripts/rubric checks.
@@ -181,6 +196,8 @@ Proxy-check policy (critical):
   prompt wording.
 - Mark out-of-scope only when a correct solution to the prompt would still fail
   due to an unrelated grader demand.
+- A different repro harness/command is not out-of-scope by itself if it validates
+  the same underlying contract.
 
 Focus:
 {user_focus}
@@ -324,6 +341,15 @@ Alignment signals (vote toward false):
 - A4 prompt approximate, grader exact on same contract
 - A5 grader more specific but still in-scope
 - A6 agent fix wrong; failure is submission issue, not prompt-grader mismatch
+
+Verdict guardrails (strict):
+- Return `is_prompt_misaligned=true` only if you can state a concrete counterfactual:
+  a correct prompt-compliant solution would still fail due to unrelated/contradictory grader demand.
+- Do NOT call misalignment based only on:
+  - different repro harness/command,
+  - grader being more specific than prompt wording,
+  - missing checks on `supporting_context` requirements.
+- Weight `core_acceptance` requirements higher than `supporting_context` requirements.
 
 Return ONLY this JSON object:
 {{
