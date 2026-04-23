@@ -24,7 +24,7 @@ only-include = ["env.py"]
 only-include = ["env.py", "pyproject.toml", "README.md"]
 
 [tool.hud]
-name = "trace-explorer"
+name = "qa-trace-yang"
 
 [tool.ruff]
 target-version = "py311"

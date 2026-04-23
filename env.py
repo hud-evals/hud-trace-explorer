@@ -82,7 +82,7 @@ else:
     BASE_PATH = str(WORKSPACE_DIR)
 
 # Create the environment
-env = Environment(name="trace-explorer")
+env = Environment(name="qa-trace-yang")
 
 # Add Claude/OpenCode-style tools (with base_path for sandboxing)
 env.add_tool(BashTool())

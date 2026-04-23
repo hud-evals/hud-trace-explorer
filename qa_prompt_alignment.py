@@ -37,7 +37,7 @@ class PromptAlignmentResult(BaseModel):
 @env.scenario("prompt_alignment_analysis", returns=PromptAlignmentResult)
 async def prompt_alignment_analysis(
     trace_id: str,
-    hud_api_key: str,
+    hud_api_key: str | None = None,
     query: str = "",
 ) -> Any:
     """Check whether the grader and submission actually match what the task prompt requires."""
