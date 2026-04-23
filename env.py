@@ -48,6 +48,7 @@ from mcp.types import ImageContent, TextContent
 # ---------------------------------------------------------------------------
 # Verification sub-agent: independently re-checks claims from QA analysis
 # ---------------------------------------------------------------------------
+from qa_alignment_subagents import alignment_env
 from qa_verification import verify_env
 
 load_dotenv()
@@ -106,9 +107,19 @@ env.add_tool(GeminiSearchTool(base_path=BASE_PATH))
 env.add_tool(GeminiGlobTool(base_path=BASE_PATH))
 env.add_tool(GeminiListTool(base_path=BASE_PATH))
 
+# Sub agent environments
+# Verification
 _verify_task = verify_env("verify_claims")
 _VERIFY_MODEL = "claude-sonnet-4-5"
 _VERIFY_MAX_STEPS = 50
+
+# Alignment
+_alignment_extract_task = alignment_env("extract_prompt_requirements")
+_alignment_grader_task = alignment_env("map_grader_checks")
+_alignment_submission_task = alignment_env("assess_submission_coverage")
+_alignment_arbiter_task = alignment_env("arbitrate_alignment")
+_ALIGNMENT_MODEL = "claude-sonnet-4-5"
+_ALIGNMENT_MAX_STEPS = 50
 
 
 def _parse_verification_output(text: str) -> dict[str, Any]:
@@ -173,6 +184,141 @@ def _parse_verification_output(text: str) -> dict[str, Any]:
         "refuted_count": len(refuted),
         "unverified_count": sum(1 for c in claims if c["status"] == "UNVERIFIED"),
     }
+
+
+def _parse_subagent_json(text: str) -> dict[str, Any] | None:
+    """Extract and parse a JSON object from a subagent response."""
+    from qa_common import _extract_json_object
+
+    if not text:
+        return None
+
+    json_str = _extract_json_object(text)
+    if not json_str:
+        return None
+
+    try:
+        parsed = json.loads(json_str)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _run_alignment_subagent(
+    subagent_name: str,
+    task_template: Any,
+    args: dict[str, Any],
+    parent_trace_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Run one alignment subtask and return (parsed_json, raw_text)."""
+    from hud.agents import create_agent
+    from hud.eval.manager import run_eval
+    from hud.telemetry.instrument import instrument
+
+    task = task_template.model_copy(update={"args": args})
+
+    @instrument(category="subagent", name=subagent_name)
+    async def _run_subagent() -> tuple[dict[str, Any] | None, str]:
+        async with run_eval(task, trace=False, trace_id=parent_trace_id, quiet=True) as ctx:
+            agent = create_agent(_ALIGNMENT_MODEL)
+            result = await agent.run(ctx, max_steps=_ALIGNMENT_MAX_STEPS)
+            raw_text = result.content if hasattr(result, "content") and result.content else ""
+            return _parse_subagent_json(raw_text), raw_text
+
+    return await _run_subagent()
+
+
+async def _run_alignment_phase_tool(
+    phase_name: str,
+    task_template: Any,
+    args: dict[str, Any],
+) -> list[TextContent]:
+    """Shared wrapper for running one alignment subagent phase as a tool."""
+    from hud.eval.context import get_current_trace_id
+    from hud.settings import settings
+
+    if not settings.api_key:
+        return [
+            TextContent(
+                type="text",
+                text='{"error":"HUD API key not available for alignment subagents"}',
+            )
+        ]
+
+    parent_trace_id = get_current_trace_id()
+    # we don't expect the parent trace id to be None
+    assert parent_trace_id is not None
+    data, raw = await _run_alignment_subagent(phase_name, task_template, args, parent_trace_id)
+    if data is None:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "error": f"Subagent phase failed: {phase_name}",
+                        "debug": raw,
+                    },
+                    ensure_ascii=True,
+                ),
+            )
+        ]
+
+    return [TextContent(type="text", text=json.dumps(data, ensure_ascii=True))]
+
+
+@env.tool()
+async def extract_prompt_requirements_subagent(user_focus: str = "") -> list[TextContent]:
+    """Run Subagent: extract atomic requirements from prompt.txt."""
+    focus = user_focus.strip() or "Extract every concrete, testable requirement from the task prompt."
+    return await _run_alignment_phase_tool(
+        "extract_prompt_requirements",
+        _alignment_extract_task,
+        {"user_focus": focus},
+    )
+
+
+@env.tool()
+async def map_grader_checks_subagent(requirements_json: str, user_focus: str = "") -> list[TextContent]:
+    """Run Subagent: map requirements to grader checks."""
+    focus = user_focus.strip() or "Map each requirement to concrete grader checks."
+    return await _run_alignment_phase_tool(
+        "map_grader_checks",
+        _alignment_grader_task,
+        {"requirements_json": requirements_json, "user_focus": focus},
+    )
+
+
+@env.tool()
+async def assess_submission_coverage_subagent(requirements_json: str, user_focus: str = "") -> list[TextContent]:
+    """Run Subagent: map requirements to submission coverage."""
+    focus = user_focus.strip() or "Determine which prompt requirements the submission actually met."
+    return await _run_alignment_phase_tool(
+        "assess_submission_coverage",
+        _alignment_submission_task,
+        {"requirements_json": requirements_json, "user_focus": focus},
+    )
+
+
+@env.tool()
+async def arbitrate_alignment_subagent(
+    requirements_json: str,
+    grader_mapping_json: str,
+    submission_mapping_json: str,
+    user_focus: str = "",
+) -> list[TextContent]:
+    """Run Subagent: arbitrate final alignment verdict."""
+    focus = user_focus.strip() or "Produce final prompt-grader-submission alignment verdict."
+    return await _run_alignment_phase_tool(
+        "arbitrate_alignment",
+        _alignment_arbiter_task,
+        {
+            "requirements_json": requirements_json,
+            "grader_mapping_json": grader_mapping_json,
+            "submission_mapping_json": submission_mapping_json,
+            "user_focus": focus,
+        },
+    )
 
 
 _last_verification_result: dict[str, Any] | None = None
