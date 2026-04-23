@@ -119,7 +119,8 @@ Extraction rules:
 - Split combined statements into separate atomic requirements.
 - Keep each requirement independently checkable.
 - Every requirement must have a direct quote from prompt.txt as evidence.
-- Prioritize requirements by relevance to pass/fail evaluation and keep only the top 10.
+- Dont repeat the requirements. If they are implied by one, you may skip mentioning them. Don't overlap.
+- Prioritize requirements by relevance.
 - Classify each requirement as:
   - `core_acceptance`: directly determines success/failure of the requested fix/outcome.
   - `supporting_context`: reproduction guidance, narrative context, or non-gating detail.
@@ -143,7 +144,6 @@ Return ONLY this JSON object:
 }}
 
 Quality bar:
-- Return at most 10 requirements (top 10 only).
 - IDs must be sequential (R1, R2, ...).
 - `quote` must be verbatim.
 - Do not return empty unless prompt.txt is truly unavailable; if unavailable, still return valid JSON with `requirements: []`.
