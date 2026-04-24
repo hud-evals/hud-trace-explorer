@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pre-push CI check for hud-python (ruff + pyright)
+# Pre-push CI check for hud-trace-explorer (ruff + pyright)
 
 cd "$(git rev-parse --show-toplevel)"
 
