@@ -218,6 +218,13 @@ def scan_external_sourcing(trace_data: dict[str, Any]) -> str:
     fetches = []
     for i, span in enumerate(trace_data.get("trajectory") or []):
         args = (((span.get("attributes") or {}).get("request") or {}).get("params") or {}).get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = _json.loads(args)
+            except (ValueError, TypeError):
+                args = {}
+        if not isinstance(args, dict):
+            continue
         cmd = args.get("command") or args.get("cmd") or ""
         if isinstance(cmd, str) and _FETCH_RE.search(cmd):
             fetches.append(f"  step {i}: {cmd.strip()[:200]}")
