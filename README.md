@@ -145,7 +145,7 @@ uv sync --extra dev
 
 ### Git Hooks
 
-Enable the shared pre-push hook (runs ruff, pyright, pytest before each push):
+Enable the shared pre-push hook (runs ruff, pyright before each push):
 
 ```bash
 git config core.hooksPath .githooks
