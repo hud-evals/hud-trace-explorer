@@ -132,3 +132,29 @@ task = env("analyze",
     data_sources=["environment", "worker"],
 )
 ```
+
+## Development Workflow
+
+## Installing Packages
+
+Install [uv](https://docs.astral.sh/uv/) and set up dev dependencies:
+
+```bash
+uv sync --extra dev
+```
+
+### Git Hooks
+
+Enable the shared pre-push hook (runs ruff, pyright before each push):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+### Code Quality
+
+```bash
+uv run ruff format . --check   # Formatting
+uv run ruff check .            # Linting
+uv run pyright                 # Type checking
+```

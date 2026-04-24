@@ -6,11 +6,21 @@ Usage:
 """
 
 import asyncio
+import json
 import os
 
 import hud
 from hud.agents import OpenAIChatAgent
 from hud.settings import settings
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageCustomToolCallParam,
+    ChatCompletionMessageFunctionToolCallParam,
+    ChatCompletionMessageParam,
+    ChatCompletionMessageToolCallUnionParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionUserMessageParam,
+)
 
 from env import env
 
@@ -31,7 +41,7 @@ async def test_analyze_manual():
     print("\n=== Test 2: Analyze (Manual Agent Loop) ===")
 
     from openai import AsyncOpenAI
-    
+
     # Use HUD inference gateway - see all models at https://hud.ai/models
     client = AsyncOpenAI(base_url="https://inference.hud.ai", api_key=settings.api_key)
 
@@ -43,7 +53,9 @@ async def test_analyze_manual():
     )
 
     async with hud.eval(task) as ctx:
-        messages = [{"role": "user", "content": ctx.prompt}]
+        prompt_text = ctx.prompt or ""
+        user_message: ChatCompletionUserMessageParam = {"role": "user", "content": prompt_text}
+        messages: list[ChatCompletionMessageParam] = [user_message]
 
         for _ in range(10):  # max steps
             response = await client.chat.completions.create(
@@ -57,10 +69,54 @@ async def test_analyze_manual():
                 print(f"Final response: {msg.content[:500] if msg.content else 'No content'}")
                 break
 
-            messages.append(msg)
+            tool_calls: list[ChatCompletionMessageToolCallUnionParam] = []
+            for tc in msg.tool_calls:
+                if tc.type == "function":
+                    function_call: ChatCompletionMessageFunctionToolCallParam = {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    tool_calls.append(function_call)
+                elif tc.type == "custom":
+                    custom_call: ChatCompletionMessageCustomToolCallParam = {
+                        "id": tc.id,
+                        "type": "custom",
+                        "custom": {
+                            "name": tc.custom.name,
+                            "input": tc.custom.input,
+                        },
+                    }
+                    tool_calls.append(custom_call)
+
+            assistant_message: ChatCompletionAssistantMessageParam = {
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": tool_calls,
+            }
+            messages.append(assistant_message)
             for tc in msg.tool_calls:
                 result = await ctx.call_tool(tc)
-                messages.append(result)
+                content: str
+                if isinstance(result, dict):
+                    raw_content = result.get("content", "")
+                else:
+                    raw_content = result
+
+                if isinstance(raw_content, str):
+                    content = raw_content
+                else:
+                    content = json.dumps(raw_content)
+
+                tool_message: ChatCompletionToolMessageParam = {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": content,
+                }
+                messages.append(tool_message)
 
 
 async def test_analyze_agent():
@@ -103,7 +159,7 @@ async def main():
     if not HUD_API_KEY:
         print("ERROR: HUD_API_KEY not set. Set via environment or hud.ai settings.")
         return
-    
+
     await test_tools_standalone()
     # await test_analyze_manual()
     await test_analyze_agent()

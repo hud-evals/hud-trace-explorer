@@ -3,13 +3,12 @@
 import json as _json
 import re as _re
 from pathlib import Path
-from typing import Any, get_args, get_origin, Literal
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import TypeAdapter
 from pydantic_core import PydanticUndefined
 
-from env import fetch_trace, write_trace_files, download_task_codebase, logger, WORKSPACE_DIR
-
+from env import download_task_codebase, fetch_trace, logger, write_trace_files
 
 # ---------------------------------------------------------------------------
 # Robust answer parsing — handles SDK data-loss, markdown fences, prose, etc.
@@ -74,9 +73,7 @@ def _regex_extract_result(text: str, model_cls: type) -> Any | None:
         annotation = field_info.annotation
         origin = get_origin(annotation)
 
-        if annotation is bool or (
-            hasattr(annotation, "__args__") and bool in getattr(annotation, "__args__", ())
-        ):
+        if annotation is bool or (hasattr(annotation, "__args__") and bool in getattr(annotation, "__args__", ())):
             pattern = _re.compile(
                 rf"""(?:"|')?{_re.escape(name)}(?:"|')?\s*[:=]\s*(?:"|')?(true|false)(?:"|')?""",
                 _re.IGNORECASE,
@@ -226,6 +223,7 @@ async def prepare_qa_context(
 
     # Ensure HUD settings has the API key so subagent create_agent() can resolve models
     from hud.settings import settings as _hud_settings
+
     if not _hud_settings.api_key and hud_api_key:
         _hud_settings.api_key = hud_api_key
 

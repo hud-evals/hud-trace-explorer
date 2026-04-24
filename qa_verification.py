@@ -5,7 +5,7 @@ from pathlib import Path
 
 from hud import Environment
 from hud.tools import BashTool
-from hud.tools.filesystem import ReadTool, GrepTool, GlobTool, ListTool
+from hud.tools.filesystem import GlobTool, GrepTool, ListTool, ReadTool
 from mcp.types import ImageContent, TextContent
 
 BASE_PATH = "/workspace"
@@ -127,5 +127,5 @@ End your response with this JSON block:
 }}
 ```"""
 
-    answer = yield prompt
+    yield prompt
     yield 1.0

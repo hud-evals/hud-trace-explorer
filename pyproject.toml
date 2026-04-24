@@ -11,7 +11,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "ruff==0.11.2"]
+dev = [
+    "pyright>=1.1.408",
+    "pytest>=8.0.0",
+    "ruff==0.11.2",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -33,3 +37,13 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "B", "I", "C4", "UP"]
 ignore = ["E501"]
+
+[tool.pyright]
+include = ["*.py"]
+exclude = [
+    "**/__pycache__",
+    "**/.venv",
+]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
