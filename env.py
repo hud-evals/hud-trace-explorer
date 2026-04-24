@@ -332,7 +332,16 @@ def _parse_subagent_json(text: str) -> dict[str, Any] | None:
 
 @env.tool()
 async def extract_prompt_requirements_subagent(user_focus: str = "") -> dict[str, Any]:
-    """Run Subagent: extract atomic requirements from prompt.txt."""
+    """(Prompt-alignment-analysis only) Extract atomic prompt requirements.
+
+    Use this as phase 1 of prompt_alignment_analysis. It reads prompt context
+    and returns a structured requirement list (R1, R2, ...) that downstream
+    subagents map against grader checks and submission evidence.
+
+    Call this BEFORE the grader/submission mapping phases. Use the result to:
+    - Provide `requirements_json` to `map_grader_checks_subagent`
+    - Provide `requirements_json` to `assess_submission_coverage_subagent`
+    """
     global _last_extract_prompt_requirements_result
 
     from hud.agents import create_agent
@@ -373,7 +382,16 @@ async def extract_prompt_requirements_subagent(user_focus: str = "") -> dict[str
 
 @env.tool()
 async def map_grader_checks_subagent(requirements_json: str, user_focus: str = "") -> dict[str, Any]:
-    """Run Subagent: map requirements to grader checks."""
+    """(Prompt-alignment-analysis only) Map requirements to grader checks.
+
+    Use this as phase 2a of prompt_alignment_analysis. Pass requirements JSON
+    from the extraction phase. This subagent determines which prompt
+    requirements are checked by the grader and flags extra grader-only checks.
+
+    Call this AFTER `extract_prompt_requirements_subagent`. Use the result to:
+    - Compare prompt-vs-grader coverage in final arbitration
+    - Provide `grader_mapping_json` to `arbitrate_alignment_subagent`
+    """
     global _last_map_grader_checks_result
 
     from hud.agents import create_agent
@@ -421,7 +439,16 @@ async def map_grader_checks_subagent(requirements_json: str, user_focus: str = "
 
 @env.tool()
 async def assess_submission_coverage_subagent(requirements_json: str, user_focus: str = "") -> dict[str, Any]:
-    """Run Subagent: map requirements to submission coverage."""
+    """(Prompt-alignment-analysis only) Map requirements to submission coverage.
+
+    Use this as phase 2b of prompt_alignment_analysis. Pass requirements JSON
+    from the extraction phase. This subagent checks which prompt requirements
+    the agent submission met and records explicit constraint violations.
+
+    Call this AFTER `extract_prompt_requirements_subagent`. Use the result to:
+    - Compare prompt-vs-submission coverage in final arbitration
+    - Provide `submission_mapping_json` to `arbitrate_alignment_subagent`
+    """
     global _last_assess_submission_coverage_result
 
     from hud.agents import create_agent
@@ -474,7 +501,17 @@ async def arbitrate_alignment_subagent(
     submission_mapping_json: str,
     user_focus: str = "",
 ) -> dict[str, Any]:
-    """Run Subagent: arbitrate final alignment verdict."""
+    """(Prompt-alignment-analysis only) Produce the final alignment verdict.
+
+    Use this as phase 3 of prompt_alignment_analysis. Pass the structured
+    outputs from extraction, grader mapping, and submission mapping. This
+    subagent weighs alignment and misalignment signals and returns the final
+    `is_prompt_misaligned` decision with requirement-level evidence.
+
+    Call this AFTER all prior alignment subagents. Use the result to:
+    - Finalize your prompt_alignment_analysis verdict
+    - Populate alignment issues and confidence from grounded evidence
+    """
     global _last_arbitrate_alignment_result
 
     from hud.agents import create_agent
