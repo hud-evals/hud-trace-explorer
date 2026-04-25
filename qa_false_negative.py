@@ -62,8 +62,9 @@ Do NOT call false negative just because:
 - The agent found a promising idea but did not deliver it.
 - A smoke test, quick check, or partial verifier passed while another required
   behavior remained broken.
-- The prompt had a hint and the environment allowed the agent to inspect or act,
-  but the agent failed to do so.
+- The prompt explicitly stated the requirement (in the prompt text, not just
+  in hidden tests/graders) and the agent could observe or complete it but
+  failed to do so.
 - The agent solved part of the task but left a genuine required part incomplete.
 - The agent's method was unusual but the final result was still wrong or incomplete.
 
@@ -78,10 +79,17 @@ For each low or zero subscore, answer these in order:
 
 2. **Does the grader's expectation match the task prompt and available task context?**
    If the grader requires an undocumented exact format, symbol, location, UI action,
-   policy interpretation, API call, file path, issue reference, or hidden artifact
-   that the prompt did not require or reasonably imply, this may be a false negative.
-   If the prompt hinted at the requirement and the agent could inspect or complete it,
-   missing it is agent failure.
+   policy interpretation, API call, file path, exception type, function signature,
+   issue reference, or hidden artifact that the prompt did not require or reasonably
+   imply, this is a false negative — even if the agent could have inspected the
+   grader/test code. **Tests, graders, and golden patches are NOT the task contract
+   unless the prompt explicitly says so.** Names, file locations, return-type
+   signatures, exact exception types, or symbol shapes that appear only in
+   grader/test code are presumptively undocumented; failing such a check while
+   passing functional intent is a false negative.
+   Only treat the requirement as discoverable when the prompt itself hinted at it
+   AND the necessary spec was visible in the trace agent's runtime workspace
+   (not the QA agent's `/workspace/task_codebase/` view).
 
 3. **Does the grader check the right surface?**
    For coding tasks, did it inspect the file/function/artifact the prompt allowed?
@@ -95,6 +103,9 @@ For each low or zero subscore, answer these in order:
    subgrader zeroed the whole reward, identify the exact unfair subscore and
    recompute only that part. If the failed subscore corresponds to a real missing
    requirement, the low score is justified.
+   **Aggregation override:** if a single binary subgrader (≥0.5 weight) zeros the
+   reward on a code-shape / format / contract check while ≥2 other graders credit
+   the work, presume false negative unless the prompt explicitly named that contract.
 
 5. **Do subjective graders disagree on the same evidence?**
    If two rubric/LLM graders read the same final artifact and one credits it while
@@ -115,12 +126,23 @@ the final state or trajectory. If evidence is unavailable, say unknown.
 
 ## Common false negative patterns, you can use them as examples, but there could be more patterns.
 
-- Correct answer rejected for surface formatting only.
+- Correct answer rejected for surface formatting only (including exception type
+  drift like `RuntimeError` vs `ValueError`, casing, whitespace, or equivalent
+  representations).
 - Valid alternative solution rejected by brittle string, AST, import, selector, or
   exact-action checks.
-- Grader expects a hidden or undocumented name, location, exact wording, or reference.
+- **Functional equivalence not credited:** the agent's change makes a guarded
+  branch provably unreachable (e.g. lowering a threshold so `len(x) < N` is always
+  false, replacing a constant with a no-op, `if False:`, dominated dead code) and
+  the grader insists on physical removal. Grader prose like "must be removed" /
+  "must be deleted" describes the grader's check, not the task requirement.
+- Grader expects a hidden or undocumented name, location, exact wording, or
+  reference (function name, file path, exception class, return signature).
+- **Hidden / injected tests:** test file is added at grade time only (e.g. via
+  `inject_test_files`, hidden test branch, grader-only artifact) and was never
+  in the trace agent's workspace.
 - Grader reads only one allowed output surface while the agent placed the work in
-  another reasonable place.
+  another reasonable place that the prompt did not forbid.
 - Environment or grader infrastructure failed before evaluating the work.
 - LLM/rubric judge ignores substantive delivered content that another grader credits.
 - Score aggregation masks a substantively correct result.
@@ -130,13 +152,18 @@ the final state or trajectory. If evidence is unavailable, say unknown.
 ## What is NOT a false negative (the low reward IS justified)
 
 - The agent's answer is factually/functionally/semantically wrong
-- The agent violated task prompt or specifications
+- The agent violated the task prompt or specifications **stated in the prompt**
 - The agent only partially completed the task and received justified partial credit
 - The agent's "alternative approach" doesn't actually solve the root problem
 - Agent disabled, bypassed, or mutated the task environment instead of solving the task.
-- The agent's work was graded on location/position/structure and was in the wrong place
-  (e.g. correct code but in the wrong file, correct bug but at the wrong line number)
+- The agent's work was graded on location/position/structure and was in the wrong place,
+  AND the correct location was either documented in the prompt or visible in the
+  trace agent's runtime workspace (not just in the QA agent's task_codebase view).
 - Agent failed because of its own tool misuse, context overflow, looping, or ignored errors.
+- Agent's PR / submission / final delivered artifact does not actually contain the
+  fix (e.g. the agent omitted a file from a retry push, or local edits were never
+  pushed). Local file_changes are NOT proof of delivery — verify the final remote /
+  submitted state.
 
 ## Critical reasoning rules
 
@@ -149,42 +176,66 @@ the final state or trajectory. If evidence is unavailable, say unknown.
    A grader can be internally consistent and still unfair if it penalizes a correct
    result for an undocumented contract or brittle representation.
 
-3. **Do not turn discoverability into unfairness.** If the prompt hinted at the needed
-   behavior and the environment allowed the agent to inspect or act, missing that
-   behavior is usually agent skill/discipline failure, not a false negative.
+3. **Discoverability has limits.** Missing a behavior is agent failure ONLY when
+   (a) the requirement was named or hinted in the prompt, AND (b) the necessary
+   spec/contract was visible to the trace agent in its runtime workspace, prompt,
+   or referenced docs. Hidden tests, golden patches, or grader code that you (the
+   QA agent) can read in `/workspace/task_codebase/` do NOT prove the trace agent
+   could see them — those are the QA's view, not the trace agent's view. Look for
+   `inject_test_files`, hidden test branches, grader-only files, or scenario
+   fixtures injected at grade time before invoking discoverability.
 
-4. **Agent effort is not correctness.** Many tool steps, long trajectories, or
+4. **Workspace separation.** `/workspace/task_codebase/` is the full task
+   definition (graders, golden patches, hidden test branches). The trace agent
+   typically had a smaller view (a baseline branch clone, a sandbox, a browser, a
+   tool API). Before judging "agent should have known," confirm via `env.py` /
+   scenario setup which branch or files the trace agent actually had.
+
+5. **Agent effort is not correctness.** Many tool steps, long trajectories, or
    confident-sounding reasoning do NOT mean the agent succeeded. Judge final delivered
    outcomes.
 
-5. **Commit to a clear verdict.** Do not hedge with "borderline" — decide yes or no.
-   When genuinely uncertain, lean toward `is_false_negative: false`.
+6. **Commit to a clear verdict.** Do not hedge with "borderline" — decide yes or no.
+   When the doubt is about whether the agent functionally solved the task, lean
+   `is_false_negative: false`. When the doubt is about whether an undocumented
+   code-shape / format / grader-only contract is fair, lean `is_false_negative: true`.
 
 {context}
 
 ## Focus
 {user_focus}
 
-## PREREQUISITE — do this before anything else
+## Optional task-codebase check
 
-Your FIRST action must be to explore `/workspace/task_codebase/`. Run these commands NOW:
-1. `ls -R /workspace/task_codebase/` to see the full tree
-2. Read grading scripts (e.g. `env.py`, `task.py`)
-3. If `tasks/*/golden/` exists, read the reference solutions
-4. If `tasks/*/tests/` exists, read the test suites
+If `/workspace/task_codebase/` exists and this appears to be a coding, ML
+engineering, or grader-inspection task, explore it before the verdict — but
+remember: what you see here is NOT proof the trace agent could see it.
 
-Not every task has golden solutions or test directories. Read whatever is available.
-## Analysis steps (after reading task workspace)
+1. `ls /workspace/task_codebase/` to see the tree.
+2. Read grading scripts (`env.py`, `task.py`, scenario grader scripts).
+3. If `tasks/*/golden/` exists, read the reference solutions.
+4. If `tasks/*/tests/` exists, read the test suites — and check whether tests
+   are injected at grade time (e.g. `inject_test_files`) or always present.
+5. Identify the trace agent's actual workspace (clone branch, sandbox dir,
+   browser URL, tool API surface) before judging discoverability.
+
+For computer-use, browser, TAU-style tool-use, web, and many other task types,
+there may be no codebase at all — use screenshots, trajectory actions, tool
+outputs, and final state instead.
+
+## Analysis steps
 
 1. Read `metadata.json` and `evaluation_result.json` to understand the reward and grading.
-2. Read `scenario_setup.json` or `scenario_code.py` to understand grading criteria to identify the actual requirement
+2. Read `scenario_setup.json` or `scenario_code.py` to understand grading criteria
+   and identify the actual requirement (separate from grader implementation).
 3. Read `trajectory_summary.txt`, `file_changes.txt`, screenshots, tool outputs,
    environment logs, and grader logs as applicable to the task type.
 4. Determine the final delivered state: code, answer, UI state, external tool state,
    file artifact, model output, workflow artifact, or other task-specific result.
-5. Compare the final delivered state to the task requirement.
+   For PR/submission tasks, verify the FINAL REMOTE state (not just local edits).
+5. Compare the final delivered state to the task **prompt**, not just the grader output.
 6. For any failed grader/subscore, run the five-question diagnostic.
-7. Check environment/worker logs for infrastructure failures only if steps 1-5 are inconclusive
+7. Check environment/worker logs for infrastructure failures only if steps 1-5 are inconclusive.
 8. Produce a clear `is_false_negative` verdict with reasoning.
 
 ## Required output format
