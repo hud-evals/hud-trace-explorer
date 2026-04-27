@@ -6,31 +6,45 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from env import env, logger
-from qa_common import parse_qa_result, prepare_qa_context
-
-
-class PromptRequirement(BaseModel):
-    requirement: str = Field(description="A concrete requirement extracted from the task prompt")
-    met_by_agent: bool = Field(description="Did the agent's submission address this requirement?")
-    checked_by_grader: bool = Field(description="Does the grader actually verify this requirement?")
-    evidence: str = Field(description="What you found — commands run and output")
+from qa_common import normalize_optional_bool, parse_qa_result, prepare_qa_context
 
 
 class PromptAlignmentResult(BaseModel):
-    reasoning: str = Field(description="Step-by-step analysis of alignment between prompt, submission, and grader")
-    requirements: list[PromptRequirement] = Field(
-        default_factory=list,
-        description="Every concrete requirement from the task prompt, with alignment status",
+    grader_check: str = Field(
+        description="The specific grader check or expectation that matters for the verdict, quoted or summarized concretely"
     )
-    prompt_grader_aligned: bool = Field(description="True if the grader checks what the prompt asks for")
-    submission_prompt_aligned: bool = Field(
-        description="True if the agent's submission addresses what the prompt asks for"
+    prompt_quote: str = Field(
+        description="The closest prompt text governing that grader check, quoted directly when possible"
     )
-    alignment_issues: list[str] = Field(
-        default_factory=list,
-        description="Specific mismatches found between prompt, grader, and submission",
+    reasoning: str = Field(
+        description=(
+            "Step-by-step analysis with evidence — what the prompt said (with quotes), "
+            "what the grader checks (with quotes), what the agent did, visibility/fairness analysis, "
+            "and why aligned/misaligned"
+        )
     )
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    misalignment_proof: str = Field(
+        default="",
+        description=(
+            "Required when is_prompt_misaligned=true: one sentence of the form "
+            "'A solution that satisfies every quoted prompt requirement would still fail "
+            "the grader because <specific check X> expects <specific value Y>.' "
+            "Empty string when is_prompt_misaligned=false."
+        ),
+    )
+    is_prompt_misaligned: bool = Field(
+        description="True only if you can state a concrete misalignment proof showing a prompt-compliant solution would still fail"
+    )
+    confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "0.9 = sharp misalignment proof with a direct grader quote; "
+            "0.5 = two reasonable readings exist; "
+            "0.2 = guessing"
+        ),
+    )
 
 
 @env.scenario("prompt_alignment_analysis", returns=PromptAlignmentResult)
@@ -38,6 +52,7 @@ async def prompt_alignment_analysis(
     trace_id: str,
     hud_api_key: str,
     query: str = "",
+    ground_truth: bool | None = None,
 ) -> AsyncGenerator[Any, None]:
     """Check whether the grader and submission actually match what the task prompt requires."""
     _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Prompt alignment analysis")
@@ -47,94 +62,135 @@ async def prompt_alignment_analysis(
         "are all aligned — does each component faithfully reflect the task requirements?"
     )
 
-    prompt = f"""You are an alignment auditor. Your job is to check whether three things are consistent:
+    prompt = f"""You are an alignment auditor.
 
-1. **The task prompt** — what the task actually asks the agent to do
-2. **The grader** — what the evaluation mechanism actually checks
-3. **The agent's submission** — what the agent actually produced
-
-These three SHOULD be aligned, but often are not. Your job is to find the gaps.
-
-## Types of misalignment
-
-### Prompt-Grader misalignment (grader doesn't check what the prompt asks)
-- Grader checks cells/fields/values that the prompt never mentioned
-- Grader ignores requirements that the prompt explicitly stated
-- Grader uses different thresholds, formats, or criteria than what the prompt specified
-- Grader checks for side effects or behaviors the prompt didn't require
-- Rubric criteria that contradict or go beyond the prompt
-
-### Submission-Prompt misalignment (agent didn't do what the prompt asked)
-- Agent solved a different problem than what was asked
-- Agent addressed some requirements but missed others
-- Agent used a method the prompt explicitly prohibited
-- Agent produced output in the wrong format or location
-- Agent made assumptions that contradict the prompt
-
-### Grader-Submission alignment without Prompt alignment
-- The agent and grader agree, but neither matches the prompt. This is the
-  most insidious case — it looks like "correct" behavior but the task
-  requirements were never actually tested.
+{user_focus}
 
 {context}
 
-## Focus
-{user_focus}
+# What "prompt misalignment" means
 
-## PREREQUISITE — do this before anything else
+A task is **prompt-misaligned** when the grader/reward is unfair relative to
+what the prompt and visible smoke tests gave the agent enough signal to do.
 
-Your FIRST actions must be:
-1. `cat /workspace/prompt.txt` — read the FULL task prompt carefully
-2. Explore `/workspace/task_codebase/` — read grading scripts, reference solutions, test suites
-3. `cat /workspace/evaluation_result.json` — see what the grader actually checked
-4. `cat /workspace/scenario_setup.json` — see grader configuration
+It is **NOT misaligned** only when the failing check is visible, specific,
+fairly weighted, and the agent simply failed that stated requirement.
 
-Do NOT skip any of these. You need all four to assess alignment.
+Hidden test cases are allowed. A hidden **test case** that only re-exercises
+the same visible invariant under another input is fair. A hidden test case is
+prompt misalignment only when it depends on a hidden requirement or convention
+that a careful prompt-following agent would not know to implement.
 
-## Analysis steps
+Visible signal means the prompt, visible smoke tests/output, and trajectory
+evidence available before the agent's final submission. Post-hoc grader output,
+hidden subscore names, and evaluator-only diagnostics tell you what failed, but
+they do not prove the original agent had enough signal unless the same detail
+appeared in those pre-submission signals.
 
-**Phase 1 — Extract requirements from the task prompt:**
-1. Read the full task prompt. List every concrete, testable requirement. Be exhaustive.
-   Examples of requirements: "compute revenue for 2023 cohort", "output must be in CSV format",
-   "fix the failing test in test_auth.py", "use the provided API endpoint".
-2. For each requirement, note whether it's explicit (stated directly) or implicit
-   (reasonably inferred from context).
+# The verdict procedure (do these in order, do not skip)
 
-**Phase 2 — Check what the grader actually verifies:**
-3. Read the grader scripts in `task_codebase/` and `scenario_setup.json`.
-4. For each prompt requirement: does the grader have a check for it? Map each requirement
-   to the specific grader check that covers it (or note its absence).
-5. Does the grader check anything the prompt DIDN'T ask for? These are extra requirements
-   the agent couldn't have known about from the prompt alone.
+Step 1 — Identify the *pass/fail-determining* grader checks. Inspect all failed
+checks that affected reward, not just the biggest or first one. If the grader
+reports failed subscores, suites, or named checks, enumerate them in
+`reasoning` and inspect the material assertion(s) inside each one. Do not stop
+after finding an obvious visible submission bug. Quote the strongest candidate
+in `grader_check`, and mention other material failed checks in `reasoning`.
+Ignore narrative checks, reproduction guidance, and informational logs.
 
-**Phase 3 — Check what the agent actually submitted:**
-6. Read `file_changes.txt` and `trajectory_summary.txt`.
-7. For each prompt requirement: did the agent's final submission address it?
-8. Did the agent do extra work the prompt didn't ask for, or skip required work?
+Step 2 — Find the closest prompt text that governs that check. Quote it in
+`prompt_quote`. If no prompt text governs it, write "none" and proceed.
 
-**Phase 4 — Cross-reference and find gaps:**
-9. Build a matrix: for each requirement, mark (met_by_agent, checked_by_grader).
-10. Flag any requirement where these disagree or where neither covers it.
-11. Special attention: if the grader PASSES but the agent MISSED a prompt requirement,
-    that's a prompt-grader misalignment (the grader is too lenient for that requirement).
-12. If the grader FAILS the agent on something the prompt never asked for, that's also
-    a prompt-grader misalignment (the grader is too strict / checks the wrong thing).
+Step 3 — Assess fairness from the agent's visible information. Do NOT ask
+whether an omniscient perfect implementation could pass. Ask whether the
+specific failing grader check was visible enough from the prompt/smoke for a
+careful prompt-following agent to implement the intended invariant, and whether
+the reward loss is proportionate to the visible mistake. Use this exact test:
+if a careful agent implemented everything the prompt visibly asked for, would
+that necessarily satisfy this grader check? Write the answer in `reasoning`.
+You MUST do this step before deciding anything — do not jump to "submission bug"
+without writing the visibility/fairness analysis first.
+When a check depends on an exact value, formula, return shape, field name,
+identifier, or literal text, ask whether that exact contract was pinned by
+pre-submission visible signals. "Strongly implied", "reasonable", or "the
+natural API" is not enough unless a softener below applies.
 
-## Required output format
+Step 4 — Verdict:
+- If the unfair-check rule below fires on any reward-affecting failing check:
+  `is_prompt_misaligned=true`, and `misalignment_proof` is the sentence "A
+  prompt-following agent could reasonably miss <check X> because the visible
+  prompt/smoke only exposed <signal Y>."
+- DO NOT BALANCE fair and unfair failures. ONE unfair reward-affecting check is
+  sufficient, even if other failures are obvious submission bugs.
+- Otherwise (you enumerated every reward-affecting failed subscore/suite/check,
+  and each one is visible, specific, fairly weighted, or only re-exercises a
+  visible invariant):
+  `is_prompt_misaligned=false`, `misalignment_proof` empty.
+
+Step 5 — Apply the softeners below only to *flip a tentative `true` to `false`*.
+They are never a reason to skip Step 3 or to stay at `false` without doing it.
+
+# Softeners (only flip true → false, never the other way)
+
+**Necessary-invariant exception:**
+An extra grader check is NOT misalignment when it is a basic necessary invariant
+with low ambiguity — limited to: the code must still compile, the schema must
+still be queryable, tests must still run, imports must resolve. Do not extend
+this exception to any hidden behavioral contract or convention the prompt did
+not make visible.
+
+**Root-cause unit-test exception:**
+Do not mark `true` merely because the grader uses a lower-level unit test than
+the prompt's end-to-end smoke. If the lower-level check directly verifies the
+same necessary root cause or invariant as the visible failure, and the prompt
+gives enough signal to investigate that code path, treat it as aligned and flip
+to `false`. This also applies to hidden inputs for the same visible invariant:
+hidden case is fair; hidden requirement or convention is not.
+This can include exact low-level formulas, masks, state transitions, or internal
+values when they are the direct implementation contract of the visible invariant
+with low ambiguity. Do not use this exception when the prompt leaves multiple
+plausible public contracts or API shapes.
+
+**Workaround rule:** if the agent's submission satisfies the prompt's literal
+success criterion only by bypassing or neutering the actual code path the
+prompt is asking about (e.g., making a function ignore its argument so a
+downstream check passes, hardcoding a value to fake the expected output,
+removing a guard so the symptom disappears), that is a submission-side
+workaround, not prompt misalignment — flip to `false`. The grader is allowed
+to inspect the call site, the argument, or the invariant that was supposed
+to be fixed, even when the prompt names only the visible symptom.
+
+# Strengthener (what makes a check unfair)
+
+**Unfair-check rule:** Inspect every reward-affecting failing check, not just
+the obvious submission bug. If at least one of them satisfies any of the
+following — taking even one is enough — mark `is_prompt_misaligned=true`:
+
+- the grader requires a specific value, formula, return shape, field name,
+  identifier, or literal that the prompt and visible signals do not pin down,
+  and a prompt-following agent would have many plausible alternatives to choose
+  from,
+- the grader rejects an alternative fix that satisfies the prompt's stated
+  success criterion,
+- one small, ambiguous, or under-specified issue causes a disproportionate
+  reward loss or cascades into many downstream test failures,
+- the grader checks an invariant the prompt does not expose, even when the
+  prompt broadly says "fix the underlying issue",
+- the trajectory shows the agent enumerated and satisfied every requirement
+  it could read from the prompt and still failed an unanticipated check
+  (cite the step).
+
+"The grader's choice is reasonable" is not a defense — reasonableness does not
+imply visibility. A hidden test case that only re-exercises a visible invariant
+is NOT a reason to apply this rule.
+
+# Required output format
 Return ONLY a JSON object — no markdown fences, no extra text:
 {{
-  "reasoning": "step-by-step analysis of alignment",
-  "requirements": [
-    {{
-      "requirement": "concrete requirement from the prompt",
-      "met_by_agent": true or false,
-      "checked_by_grader": true or false,
-      "evidence": "commands and output proving this"
-    }}
-  ],
-  "prompt_grader_aligned": true or false,
-  "submission_prompt_aligned": true or false,
-  "alignment_issues": ["specific mismatch 1", "specific mismatch 2"],
+  "grader_check": "the specific grader check or expected value that matters most",
+  "prompt_quote": "the closest quoted prompt requirement for that check",
+  "reasoning": "what the prompt exposes (with quotes), what the grader checks (with quotes), what the agent did, whether the reward loss is proportionate, and the verdict reasoning",
+  "misalignment_proof": "",
+  "is_prompt_misaligned": true or false,
   "confidence": 0.0 to 1.0
 }}
 """
@@ -147,7 +203,15 @@ Return ONLY a JSON object — no markdown fences, no extra text:
         yield 0.0
         return
 
-    if not result.prompt_grader_aligned or not result.submission_prompt_aligned:
-        yield 0.0
+    is_misaligned = result.is_prompt_misaligned
+    if is_misaligned and not result.misalignment_proof.strip():
+        logger.warning(
+            "Agent returned is_prompt_misaligned=true with empty misalignment_proof; flipping to false per guardrail"
+        )
+        is_misaligned = False
+
+    gt = normalize_optional_bool(ground_truth)
+    if gt is not None:
+        yield 1.0 if (is_misaligned == gt) else 0.0
     else:
-        yield 1.0
+        yield 0.0 if is_misaligned else 1.0
