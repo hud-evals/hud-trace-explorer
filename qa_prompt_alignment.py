@@ -27,13 +27,13 @@ class PromptAlignmentResult(BaseModel):
         default="",
         description=(
             "Required when is_prompt_misaligned=true: one sentence of the form "
-            "'A solution that satisfies every quoted prompt requirement would still fail "
-            "the grader because <specific check X> expects <specific value Y>.' "
+            "'A solution could satisfy every visible prompt/smoke requirement and still fail "
+            "because <specific check X> requires <hidden or under-specified condition Y>.' "
             "Empty string when is_prompt_misaligned=false."
         ),
     )
     is_prompt_misaligned: bool = Field(
-        description="True only if you can state a concrete misalignment proof showing a prompt-compliant solution would still fail"
+        description="True only if you can state a concrete proof that a solution satisfying the visible requirements could still fail"
     )
     confidence: float = Field(
         default=0.5,
@@ -114,11 +114,19 @@ identifier, or literal text, ask whether that exact contract was pinned by
 pre-submission visible signals. "Strongly implied", "reasonable", or "the
 natural API" is not enough unless a softener below applies.
 
+Before claiming the failing check was hidden, you MUST inspect the visible
+smoke's actual stdout/stderr (not just its exit status). If the smoke prints
+the failing metric name, the failing case label, the offending value, or any
+diagnostic that names the invariant the grader checks, the check is NOT
+hidden — even if the prompt prose does not name the metric. Quote the smoke
+output text in `reasoning`. If you did not read the smoke's actual output,
+do not return `is_prompt_misaligned=true`.
+
 Step 4 — Verdict:
 - If the unfair-check rule below fires on any reward-affecting failing check:
   `is_prompt_misaligned=true`, and `misalignment_proof` is the sentence "A
-  prompt-following agent could reasonably miss <check X> because the visible
-  prompt/smoke only exposed <signal Y>."
+  solution could satisfy every visible prompt/smoke requirement and still fail
+  because <check X> requires <hidden or under-specified condition Y>."
 - DO NOT BALANCE fair and unfair failures. ONE unfair reward-affecting check is
   sufficient, even if other failures are obvious submission bugs.
 - Otherwise (you enumerated every reward-affecting failed subscore/suite/check,
@@ -184,7 +192,9 @@ imply visibility. A hidden test case that only re-exercises a visible invariant
 is NOT a reason to apply this rule.
 
 # Required output format
-Return ONLY a JSON object — no markdown fences, no extra text:
+Return the JSON object directly in your final assistant message as plain text.
+Do NOT use bash, cat, heredoc, write_file, or any tool to print or save it.
+Do NOT wrap it in markdown code fences. No commentary before or after.
 {{
   "grader_check": "the specific grader check or expected value that matters most",
   "prompt_quote": "the closest quoted prompt requirement for that check",
