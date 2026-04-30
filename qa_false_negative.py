@@ -147,6 +147,13 @@ the final state or trajectory. If evidence is unavailable, say unknown.
 - LLM/rubric judge ignores substantive delivered content that another grader credits.
 - Score aggregation masks a substantively correct result.
 
+Worked example: the agent raises `RuntimeError` or exits nonzero to surface a
+failure, while an injected hidden test expects `pytest.raises(ValueError)`. If the
+task prompt only said to fail loudly, surface the error, or prevent silent success,
+the exact exception type is an undocumented contract. Verdict: false negative.
+Do not rationalize that exception types matter to callers unless the task prompt or
+runtime-visible docs named that exception contract.
+
 
 
 ## What is NOT a false negative (the low reward IS justified)
@@ -184,6 +191,12 @@ the final state or trajectory. If evidence is unavailable, say unknown.
    could see them — those are the QA's view, not the trace agent's view. Look for
    `inject_test_files`, hidden test branches, grader-only files, or scenario
    fixtures injected at grade time before invoking discoverability.
+   Phrases like "real functional implications", "programmatic callers may depend
+   on it", or "part of the public API" are NOT independent evidence that a hidden
+   contract was documented. A contract is documented only if it appears in the task
+   prompt, referenced docs, or code the trace agent could see in its runtime
+   workspace. If you are arguing why a hidden contract matters, first ask whether
+   the prompt named it; if not, the low score is a false negative.
 
 4. **Workspace separation.** `/workspace/task_codebase/` is the full task
    definition (graders, golden patches, hidden test branches). The trace agent
@@ -197,7 +210,8 @@ the final state or trajectory. If evidence is unavailable, say unknown.
 
 6. **Commit to a clear verdict.** Do not hedge with "borderline" — decide yes or no.
    When the doubt is about whether the agent functionally solved the task, lean
-   `is_false_negative: false`. When the doubt is about whether an undocumented
+   `is_false_negative: true` and flag the reason in the reasoning and require further investigation from the QA team. 
+   When the doubt is about whether an undocumented
    code-shape / format / grader-only contract is fair, lean `is_false_negative: true`.
 
 {context}
