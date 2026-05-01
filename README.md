@@ -133,6 +133,26 @@ task = env("analyze",
 )
 ```
 
+## Grading against a project rubric
+
+All QA scenarios (and `verify_claims`) take an optional `rubric` string of
+project-specific grading criteria. When set, it is written to
+`/workspace/rubric.md` and the analyst is told to read it first; rubric rules
+override the generic playbook.
+
+```python
+from pathlib import Path
+
+task = env(
+    "failure_analysis",
+    trace_id="...",
+    hud_api_key=api_key,
+    rubric=Path("rubrics/project.md").read_text(),  # or any string
+)
+```
+
+Use `query` for one-trace focus; use `rubric` for project-wide criteria.
+
 ## Development Workflow
 
 ## Installing Packages

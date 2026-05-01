@@ -52,17 +52,20 @@ async def prompt_alignment_analysis(
     trace_id: str,
     hud_api_key: str,
     query: str = "",
+    rubric: str | None = None,
     ground_truth: bool | None = None,
 ) -> AsyncGenerator[Any, None]:
     """Check whether the grader and submission actually match what the task prompt requires."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Prompt alignment analysis")
+    _, _, context, rubric_block = await prepare_qa_context(
+        trace_id, hud_api_key, "Prompt alignment analysis", rubric=rubric
+    )
 
     user_focus = query.strip() or (
         "Check whether the task prompt, the grader, and the agent's submission "
         "are all aligned — does each component faithfully reflect the task requirements?"
     )
 
-    prompt = f"""You are an alignment auditor.
+    prompt = f"""{rubric_block}You are an alignment auditor.
 
 {user_focus}
 

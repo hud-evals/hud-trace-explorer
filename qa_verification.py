@@ -56,12 +56,25 @@ async def view_screenshot(step: int) -> list[TextContent | ImageContent]:
 
 
 @verify_env.scenario("verify_claims")
-async def verify_claims(claims: str):
+async def verify_claims(claims: str, rubric: str | None = None):
     """Independently verify a list of claims about a trace.
 
     The verification agent re-runs commands and tries to disprove each claim.
     It has read + bash access to /workspace/ trace files but cannot edit anything.
     """
+    rubric_path = _WORKSPACE / "rubric.md"
+    if rubric and rubric.strip():
+        rubric_path.parent.mkdir(parents=True, exist_ok=True)
+        rubric_path.write_text(rubric.strip() + "\n")
+
+    if rubric_path.exists():
+        rubric_file_line = (
+            "- rubric.md: ⚠️ project grading rubric — overrides generic verification norms; "
+            "read first and cite the rule used in each claim's `reason` field\n"
+        )
+    else:
+        rubric_file_line = ""
+
     prompt = f"""You are a fast, focused verifier. Check each claim with ONE command each,
 then output your JSON verdict. You have a STRICT budget of 15 tool calls total. Do NOT
 exceed this. Be efficient: one command per claim, no re-running with variations.
@@ -72,7 +85,7 @@ exceed this. Be efficient: one command per claim, no re-running with variations.
 
 === KEY FILES ===
 
-- evaluation_result.json: grading output (use `jq` to query specific fields)
+{rubric_file_line}- evaluation_result.json: grading output (use `jq` to query specific fields)
 - file_changes.txt: agent's code changes (use `grep` to find functions/patterns)
 - trajectory_summary.txt: agent action sequence
 - prompt.txt: task specification
