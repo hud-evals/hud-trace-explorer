@@ -22,17 +22,20 @@ async def false_positive_analysis(
     trace_id: str,
     hud_api_key: str,
     query: str = "",
+    rubric: str | None = None,
     ground_truth: bool | None = None,
 ) -> AsyncGenerator[Any, None]:
     """Determine whether a passing trace is a false positive."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "False positive analysis")
+    _, _, context, rubric_block = await prepare_qa_context(
+        trace_id, hud_api_key, "False positive analysis", rubric=rubric
+    )
 
     user_focus = query.strip() or (
         "Determine whether this trace is a false positive — did the agent "
         "receive credit without actually solving the task?"
     )
 
-    prompt = f"""You are a QA analyst checking for FALSE POSITIVES in agent evaluation.
+    prompt = f"""{rubric_block}You are a QA analyst checking for FALSE POSITIVES in agent evaluation.
 
 A false positive occurs when the agent receives a passing reward but didn't genuinely
 solve the task. This silently inflates pass rates. Common causes include:

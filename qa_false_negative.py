@@ -22,17 +22,20 @@ async def false_negative_analysis(
     trace_id: str,
     hud_api_key: str,
     query: str = "",
+    rubric: str | None = None,
     ground_truth: bool | None = None,
 ) -> AsyncGenerator[Any, None]:
     """Determine whether a low-reward trace is a false negative."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "False negative analysis")
+    _, _, context, rubric_block = await prepare_qa_context(
+        trace_id, hud_api_key, "False negative analysis", rubric=rubric
+    )
 
     user_focus = query.strip() or (
         "Determine whether this trace is a false negative — did the agent "
         "actually succeed at the task but receive a low or zero reward?"
     )
 
-    prompt = f"""You are a QA analyst checking for FALSE NEGATIVES in agent evaluation.
+    prompt = f"""{rubric_block}You are a QA analyst checking for FALSE NEGATIVES in agent evaluation.
 
 A false negative occurs when the agent's work is correct (or substantially correct) but
 the grader gave it a low or zero reward.

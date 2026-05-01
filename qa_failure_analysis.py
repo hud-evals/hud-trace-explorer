@@ -77,14 +77,15 @@ async def failure_analysis(
     trace_id: str,
     hud_api_key: str,
     query: str = "",
+    rubric: str | None = None,
     ground_truth: str | None = None,
 ) -> AsyncGenerator[Any, None]:
     """Analyze why a trace failed — find all problems, not just a single category."""
-    _, _, context = await prepare_qa_context(trace_id, hud_api_key, "Failure analysis")
+    _, _, context, rubric_block = await prepare_qa_context(trace_id, hud_api_key, "Failure analysis", rubric=rubric)
 
     user_focus = query.strip() or "Find every problem that contributed to this trace's failure."
 
-    prompt = f"""You are a failure analyst. A trace failed or received a low reward. Your job
+    prompt = f"""{rubric_block}You are a failure analyst. A trace failed or received a low reward. Your job
 is to find **every distinct problem** that contributed to the failure.
 
 {context}

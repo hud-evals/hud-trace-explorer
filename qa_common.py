@@ -1,6 +1,7 @@
 """Shared setup for QA workflow scenarios."""
 
 import json as _json
+import logging
 import re as _re
 from pathlib import Path
 from typing import Any, Literal, get_args, get_origin
@@ -8,7 +9,7 @@ from typing import Any, Literal, get_args, get_origin
 from pydantic import TypeAdapter
 from pydantic_core import PydanticUndefined
 
-from env import download_task_codebase, fetch_trace, logger, write_trace_files
+LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Robust answer parsing — handles SDK data-loss, markdown fences, prose, etc.
@@ -180,7 +181,7 @@ def parse_qa_result(answer: Any, model_cls: type) -> Any | None:
                     pass
             regex_result = _regex_extract_result(raw, model_cls)
             if regex_result is not None:
-                logger.warning("Used last-resort regex extraction for %s", model_cls.__name__)
+                LOGGER.warning("Used last-resort regex extraction for %s", model_cls.__name__)
                 return regex_result
         return None
 
@@ -247,12 +248,11 @@ async def prepare_qa_context(
     trace_id: str,
     hud_api_key: str,
     scenario_label: str,
-) -> tuple[dict[str, Any], dict[str, Path], str]:
-    """Fetch trace data, write workspace files, and build the shared context block.
+    rubric: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Path], str, str]:
+    """Fetch trace data, write workspace files, and build shared prompt sections."""
+    from env import WORKSPACE_DIR, download_task_codebase, fetch_trace, logger, write_trace_files
 
-    Returns (trace_data, files_written, context_block) where context_block
-    is a ready-to-embed string with trace metadata and file descriptions.
-    """
     data_sources = ["telemetry", "environment", "worker"]
 
     # Ensure HUD settings has the API key so subagent create_agent() can resolve models
@@ -272,6 +272,12 @@ async def prepare_qa_context(
         source_dir = await download_task_codebase(registry_id, hud_api_key)
         if source_dir:
             files_written["task_codebase"] = source_dir
+
+    if rubric and rubric.strip():
+        rubric_path = WORKSPACE_DIR / "rubric.md"
+        rubric_path.parent.mkdir(parents=True, exist_ok=True)
+        rubric_path.write_text(rubric.strip() + "\n")
+        files_written["rubric"] = rubric_path
 
     status = trace_data.get("status") or "unknown"
     reward = trace_data.get("reward", "unknown")
@@ -297,6 +303,12 @@ async def prepare_qa_context(
         "worker_logs": "orchestrator / rollout worker logs (can be LARGE — grep for errors first)",
         "task_codebase": "⚠️ The source code of the task environment — grading logic, scenario definitions, reference solutions, and test suites. Run `ls /workspace/task_codebase/` to explore. Read the grading scripts and any golden solutions inside to understand what correct behavior looks like",
     }
+    if "rubric" in files_written:
+        file_descriptions["rubric"] = (
+            "⚠️ PROJECT RUBRIC — authoritative grading criteria for this trace. "
+            "READ THIS FIRST. Rules here override the generic analyst playbook in your prompt. "
+            "Cite the rubric rule you applied in your reasoning (or state no rule applied)"
+        )
 
     file_lines = []
     for key, path in files_written.items():
@@ -306,6 +318,19 @@ async def prepare_qa_context(
         if not desc and "screenshot" in key:
             desc = "screenshot image"
         file_lines.append(f"  - `{path.name}` — {desc}" if desc else f"  - `{path.name}`")
+
+    if rubric and rubric.strip():
+        rubric_block = (
+            "## Your grading rubric for this trace: `/workspace/rubric.md`\n\n"
+            "**Your FIRST action MUST be:** "
+            '`read_file("rubric.md")` (or `bash("cat /workspace/rubric.md")`).\n\n'
+            "Rubric rules override the generic playbook below; fall back to the\n"
+            "playbook only when the rubric is silent. Quote (or short-tag) each\n"
+            "rubric rule you apply, or state explicitly that no rule applied.\n\n"
+            "---\n\n"
+        )
+    else:
+        rubric_block = ""
 
     context = f"""## Trace context
 - **Trace ID:** {trace_id}
@@ -350,4 +375,4 @@ understand how context was delivered before concluding an agent "skipped" steps.
 **Important:** Your verdict must be returned as structured output via the tool response.
 Do NOT write results to files — your structured response IS your submission."""
 
-    return trace_data, files_written, context
+    return trace_data, files_written, context, rubric_block
