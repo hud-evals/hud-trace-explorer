@@ -39,7 +39,7 @@ class RewardHackingResult(BaseModel):
 @env.scenario("reward_hacking_analysis", returns=RewardHackingResult)
 async def reward_hacking_analysis(
     trace_id: str,
-    hud_api_key: str | None = None,
+    hud_api_key: str,
     query: str = "",
     ground_truth: bool | None = None,
 ) -> AsyncGenerator[Any, None]:

@@ -245,43 +245,31 @@ def scan_external_sourcing(trace_data: dict[str, Any]) -> str:
 
 async def prepare_qa_context(
     trace_id: str,
-    hud_api_key: str | None,
+    hud_api_key: str,
     scenario_label: str,
 ) -> tuple[dict[str, Any], dict[str, Path], str]:
     """Fetch trace data, write workspace files, and build the shared context block.
 
     Returns (trace_data, files_written, context_block) where context_block
     is a ready-to-embed string with trace metadata and file descriptions.
-
-    `hud_api_key` may be None — in that case we fall back to
-    `hud.settings.api_key` or the `HUD_API_KEY` env var that the
-    platform injects at container start.
     """
-    import os
-    from hud.settings import settings as _hud_settings
-
-    api_key = hud_api_key or _hud_settings.api_key or os.environ.get("HUD_API_KEY", "")
-    if not api_key:
-        raise ValueError(
-            f"No HUD API key available for {scenario_label}. "
-            "Set HUD_API_KEY env var or pass hud_api_key argument."
-        )
+    data_sources = ["telemetry", "environment", "worker"]
 
     # Ensure HUD settings has the API key so subagent create_agent() can resolve models
+    from hud.settings import settings as _hud_settings
+
     if not _hud_settings.api_key and hud_api_key:
         _hud_settings.api_key = hud_api_key
 
-    data_sources = ["telemetry", "environment", "worker"]
-
     logger.info("%s for trace %s", scenario_label, trace_id)
 
-    trace_data = await fetch_trace(trace_id, api_key, data_sources)
+    trace_data = await fetch_trace(trace_id, hud_api_key, data_sources)
     files_written = await write_trace_files(trace_data, data_sources)
 
     # Download environment source code if registry_id is available
     registry_id = trace_data.get("registry_id")
     if registry_id:
-        source_dir = await download_task_codebase(registry_id, api_key)
+        source_dir = await download_task_codebase(registry_id, hud_api_key)
         if source_dir:
             files_written["task_codebase"] = source_dir
 

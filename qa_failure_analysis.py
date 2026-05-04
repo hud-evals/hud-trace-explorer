@@ -75,7 +75,7 @@ def _normalize_fault(fault: str) -> str:
 @env.scenario("failure_analysis", returns=FailureAnalysisResult)
 async def failure_analysis(
     trace_id: str,
-    hud_api_key: str | None = None,
+    hud_api_key: str,
     query: str = "",
     ground_truth: str | None = None,
 ) -> AsyncGenerator[Any, None]:

@@ -20,7 +20,7 @@ class FalsePositiveResult(BaseModel):
 @env.scenario("false_positive_analysis", returns=FalsePositiveResult)
 async def false_positive_analysis(
     trace_id: str,
-    hud_api_key: str | None = None,
+    hud_api_key: str,
     query: str = "",
     ground_truth: bool | None = None,
 ) -> AsyncGenerator[Any, None]:
